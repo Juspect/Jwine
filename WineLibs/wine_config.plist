@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>WineVersion</key>
+    <string>8.0-stub</string>
+    <key>BuildDate</key>
+    <string>2025-06-28T03:01:02Z</string>
+    <key>BuildType</key>
+    <string>Testing</string>
+    <key>SupportedArchitectures</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>CoreLibraries</key>
+    <array>
+        <string>libwine.dylib</string>
+        <string>ntdll.dll.so</string>
+        <string>kernel32.dll.so</string>
+        <string>user32.dll.so</string>
+        <string>gdi32.dll.so</string>
+    </array>
+    <key>Note</key>
+    <string>This is a minimal stub version for testing purposes only</string>
+</dict>
+</plist>

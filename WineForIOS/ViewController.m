@@ -129,14 +129,9 @@
     
     UIDocumentPickerViewController *documentPicker;
     
-    if (@available(iOS 14.0, *)) {
-        documentPicker = [[UIDocumentPickerViewController alloc]
-                          initForOpeningContentTypes:@[UTTypeItem, UTTypeExecutable]];
-    } else {
-        documentPicker = [[UIDocumentPickerViewController alloc]
-                          initWithDocumentTypes:@[@"public.item", @"com.microsoft.windows-executable"]
-                          inMode:UIDocumentPickerModeOpen];
-    }
+    documentPicker = [[UIDocumentPickerViewController alloc]
+                      initForOpeningContentTypes:@[UTTypeItem, UTTypeExecutable]
+                      asCopy:YES]; // Use asCopy:YES to let system handle file copy
     
     documentPicker.delegate = self;
     documentPicker.allowsMultipleSelection = NO;

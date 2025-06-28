@@ -1,10 +1,13 @@
+// WineContainer.m - 修复版本
 #import "WineContainer.h"
+#import "WineLibraryManager.h"
 
 @interface WineContainer()
 @property (nonatomic, strong) NSString *containerName;
 @property (nonatomic, strong) NSString *containerPath;
 @property (nonatomic, strong) NSString *winePrefixPath;
 @property (nonatomic, assign) WineContainerStatus status;
+@property (nonatomic, strong) WineLibraryManager *wineManager;
 @end
 
 @implementation WineContainer
@@ -14,6 +17,7 @@
     if (self) {
         _containerName = [name copy];
         _status = WineContainerStatusNotCreated;
+        _wineManager = [WineLibraryManager sharedManager];
         [self setupPaths];
     }
     return self;
@@ -30,6 +34,13 @@
 
 - (BOOL)createContainer {
     self.status = WineContainerStatusCreating;
+    
+    // 先加载Wine库
+    if (![self.wineManager loadWineLibraries]) {
+        NSLog(@"Failed to load Wine libraries");
+        self.status = WineContainerStatusError;
+        return NO;
+    }
     
     NSFileManager *fileManager = [NSFileManager defaultManager];
     NSError *error = nil;
@@ -56,6 +67,13 @@
     
     // 创建基础配置文件
     [self createBasicWineConfiguration];
+    
+    // 初始化Wine环境
+    if (![self.wineManager initializeWineEnvironment:self.winePrefixPath]) {
+        NSLog(@"Failed to initialize Wine environment");
+        self.status = WineContainerStatusError;
+        return NO;
+    }
     
     self.status = WineContainerStatusReady;
     return YES;
@@ -106,14 +124,22 @@
 }
 
 - (BOOL)executeProgram:(NSString *)exePath withArguments:(nullable NSArray<NSString *> *)arguments {
-    // 这里会调用Wine来执行程序
-    // 暂时返回基础实现，实际需要集成Wine和Box64
+    if (self.status != WineContainerStatusReady) {
+        NSLog(@"Container not ready");
+        return NO;
+    }
+    
+    if (!self.wineManager.isLoaded) {
+        NSLog(@"Wine libraries not loaded");
+        return NO;
+    }
+    
     NSLog(@"Executing: %@ with arguments: %@", exePath, arguments);
     
-    // TODO: 集成Wine执行逻辑
-    // TODO: 集成Box64指令转换
+    // 使用真正的Wine执行程序
+    int exitCode = [self.wineManager executeProgram:exePath arguments:arguments];
     
-    return YES;
+    return exitCode == 0;
 }
 
 @end

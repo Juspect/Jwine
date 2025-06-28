@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>WineVersion</key>
+    <string>8.0-ios</string>
+    <key>BuildDate</key>
+    <string>2025-06-28T05:37:40Z</string>
+    <key>BuildType</key>
+    <string>iOS优化版</string>
+    <key>TargetArchitecture</key>
+    <string>arm64</string>
+    <key>MinimumiOSVersion</key>
+    <string>16.0</string>
+    <key>CoreLibraries</key>
+    <array>
+        <string>libwine.dylib</string>
+        <string>ntdll.dll.so</string>
+        <string>kernel32.dll.so</string>
+        <string>user32.dll.so</string>
+        <string>gdi32.dll.so</string>
+    </array>
+    <key>Note</key>
+    <string>此版本专为iOS ARM64架构构建，支持iOS 16.0+</string>
+</dict>
+</plist>
