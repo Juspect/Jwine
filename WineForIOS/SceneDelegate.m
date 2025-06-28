@@ -1,30 +1,18 @@
 #import "SceneDelegate.h"
 #import "ViewController.h"
+#import "UpdatedMainViewController.h"
 
 @implementation SceneDelegate
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
-    NSLog(@"SceneDelegate willConnectToSession called");
-    
-    // 确保scene是UIWindowScene类型
-    if (![scene isKindOfClass:[UIWindowScene class]]) {
-        return;
-    }
-    
     UIWindowScene *windowScene = (UIWindowScene *)scene;
-    
-    // 创建window
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
-    self.window.backgroundColor = [UIColor whiteColor];
     
-    // 创建根视图控制器
-    ViewController *viewController = [[ViewController alloc] init];
-    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:viewController];
+    UpdatedMainViewController *mainVC = [[UpdatedMainViewController alloc] init];
+    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:mainVC];
     
     self.window.rootViewController = navController;
     [self.window makeKeyAndVisible];
-    
-    NSLog(@"Window created and made key in SceneDelegate");
 }
 
 - (void)sceneDidDisconnect:(UIScene *)scene {

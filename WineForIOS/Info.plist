@@ -61,7 +61,7 @@
     
     <!-- 最低iOS版本 -->
     <key>MinimumOSVersion</key>
-    <string>16.6</string>
+    <string>16.0</string>
     
     <!-- 支持的设备 -->
     <key>UIRequiredDeviceCapabilities</key>
@@ -72,5 +72,83 @@
     <!-- 状态栏样式 -->
     <key>UIStatusBarStyle</key>
     <string>UIStatusBarStyleDefault</string>
+    
+    <!-- 支持文档浏览 -->
+    <key>UISupportsDocumentBrowser</key>
+    <true/>
+    
+    <!-- 文件共享支持 -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    
+    <!-- 支持iTunes文件共享 -->
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    
+    <!-- 导入的文档类型 -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Windows Executable</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.microsoft.windows-executable</string>
+                <string>public.executable</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>All Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.item</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+    </array>
+    
+    <!-- 导出的UTI类型 -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.microsoft.windows-executable</string>
+            <key>UTTypeDescription</key>
+            <string>Windows Executable</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.executable</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>exe</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+    
+    <!-- 后台模式 (如果需要) -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>background-processing</string>
+    </array>
+    
+    <!-- 隐私权限描述 -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>This app may need to access photos for Windows applications that use image files.</string>
+    
+    <key>NSDocumentsDirectoryUsageDescription</key>
+    <string>This app needs access to documents to run Windows executable files.</string>
 </dict>
 </plist>
