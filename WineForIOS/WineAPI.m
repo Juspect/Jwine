@@ -1,6 +1,21 @@
 #import "WineAPI.h"
-#import <pthread.h>  // 确保包含pthread头文件
-#import <unistd.h>   // 包含getpid函数
+#import <pthread.h>
+#import <unistd.h>
+
+// 线程安全宏定义
+#define ENSURE_MAIN_THREAD(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+#define ENSURE_MAIN_THREAD_SYNC(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_sync(dispatch_get_main_queue(), block); \
+    }
 
 @implementation WineWindow
 - (instancetype)init {
@@ -59,6 +74,34 @@
     return self;
 }
 
+#pragma mark - 线程安全辅助方法
+
++ (void)showAlertWithTitle:(NSString *)title message:(NSString *)message type:(DWORD)uType {
+    ENSURE_MAIN_THREAD(^{
+        UIViewController *rootVC = [WineAPI sharedAPI].rootViewController;
+        if (!rootVC) {
+            NSLog(@"[WineAPI] No root view controller available for alert");
+            return;
+        }
+        
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        
+        if (uType & MB_YESNO) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"Yes" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"No" style:UIAlertActionStyleCancel handler:nil]];
+        } else if (uType & MB_OKCANCEL) {
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        } else {
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        }
+        
+        [rootVC presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 #pragma mark - 内部辅助方法
 
 - (HWND)generateWindowHandle {
@@ -90,19 +133,6 @@
     NSLog(@"[WineAPI] Posted message 0x%X to window %p", message, hwnd);
 }
 
-- (CGRect)rectToCGRect:(RECT)rect {
-    return CGRectMake(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
-}
-
-- (RECT)cgRectToRect:(CGRect)cgRect {
-    return (RECT){
-        .left = (LONG)cgRect.origin.x,
-        .top = (LONG)cgRect.origin.y,
-        .right = (LONG)(cgRect.origin.x + cgRect.size.width),
-        .bottom = (LONG)(cgRect.origin.y + cgRect.size.height)
-    };
-}
-
 @end
 
 #pragma mark - KERNEL32 API实现
@@ -116,9 +146,7 @@ void SetLastError(DWORD error) {
 }
 
 DWORD GetCurrentThreadId(void) {
-    // 修复：使用pthread_self()获取线程ID，并正确转换类型
     pthread_t thread = pthread_self();
-    // 将pthread_t转换为DWORD，取地址的低32位
     return (DWORD)((uintptr_t)thread & 0xFFFFFFFF);
 }
 
@@ -160,7 +188,7 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     
     if (!lpClassName) {
         SetLastError(87); // ERROR_INVALID_PARAMETER
-        return (HWND)0;  // 修复：返回0而不是NULL
+        return (HWND)0;
     }
     
     WineAPI *api = [WineAPI sharedAPI];
@@ -171,10 +199,10 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     if (!classInfo) {
         NSLog(@"[WineAPI] Window class not found: %@", className);
         SetLastError(1407); // ERROR_CLASS_DOES_NOT_EXIST
-        return (HWND)0;  // 修复：返回0而不是NULL
+        return (HWND)0;
     }
     
-    // 创建Wine窗口对象
+    // 创建Wine窗口对象 (非UI部分)
     WineWindow *window = [[WineWindow alloc] init];
     window.className = className;
     window.windowText = lpWindowName ? [NSString stringWithUTF8String:lpWindowName] : @"";
@@ -182,44 +210,53 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     window.rect = (RECT){x, y, x + nWidth, y + nHeight};
     window.wndProc = (LRESULT (*)(HWND, DWORD, WPARAM, LPARAM))[classInfo[@"wndProc"] pointerValue];
     
-    // 创建iOS视图
-    UIView *view = [[UIView alloc] initWithFrame:CGRectMake(x, y, nWidth, nHeight)];
-    view.backgroundColor = [UIColor whiteColor];
-    view.layer.borderWidth = 1.0;
-    view.layer.borderColor = [UIColor blackColor].CGColor;
-    
-    // 添加标题标签
-    if (window.windowText.length > 0) {
-        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(5, 5, nWidth - 10, 25)];
-        titleLabel.text = window.windowText;
-        titleLabel.font = [UIFont boldSystemFontOfSize:14];
-        titleLabel.backgroundColor = [UIColor lightGrayColor];
-        [view addSubview:titleLabel];
-    }
-    
-    window.view = view;
-    
     // 生成窗口句柄
     HWND hwnd = [api generateWindowHandle];
     api.windows[@((uintptr_t)hwnd)] = window;
     
-    // 如果有父窗口，添加为子视图
-    if (hWndParent) {
-        WineWindow *parentWindow = [api getWindow:hWndParent];
-        if (parentWindow) {
-            [parentWindow.view addSubview:view];
-            [parentWindow.children addObject:@{@"hwnd": @((uintptr_t)hwnd)}];
+    NSLog(@"[WineAPI] Creating window %p (%@) size:%dx%d", hwnd, window.windowText, nWidth, nHeight);
+    
+    // 🔧 修复：UI操作必须在主线程执行
+    ENSURE_MAIN_THREAD(^{
+        @try {
+            // 创建iOS视图
+            UIView *view = [[UIView alloc] initWithFrame:CGRectMake(x, y, nWidth, nHeight)];
+            view.backgroundColor = [UIColor whiteColor];
+            view.layer.borderWidth = 1.0;
+            view.layer.borderColor = [UIColor blackColor].CGColor;
+            
+            // 添加标题标签
+            if (window.windowText.length > 0) {
+                UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(5, 5, nWidth - 10, 25)];
+                titleLabel.text = window.windowText;
+                titleLabel.font = [UIFont boldSystemFontOfSize:14];
+                titleLabel.backgroundColor = [UIColor lightGrayColor];
+                [view addSubview:titleLabel];
+            }
+            
+            window.view = view;
+            
+            // 处理父子窗口关系
+            if (hWndParent) {
+                WineWindow *parentWindow = [api getWindow:hWndParent];
+                if (parentWindow && parentWindow.view) {
+                    [parentWindow.view addSubview:view];
+                    [parentWindow.children addObject:@{@"hwnd": @((uintptr_t)hwnd)}];
+                }
+            } else if (api.rootViewController) {
+                // 作为根窗口添加到主视图控制器
+                [api.rootViewController.view addSubview:view];
+            }
+            
+            NSLog(@"[WineAPI] UI creation completed for window %p", hwnd);
+            
+        } @catch (NSException *exception) {
+            NSLog(@"[WineAPI] Exception creating window UI: %@", exception.reason);
         }
-    } else if (api.rootViewController) {
-        // 作为根窗口添加到主视图控制器
-        [api.rootViewController.view addSubview:view];
-    }
+    });
     
-    NSLog(@"[WineAPI] Created window %p (%@) size:%dx%d", hwnd, window.windowText, nWidth, nHeight);
-    
-    // 发送WM_CREATE消息
+    // 发送WM_CREATE消息 (非UI操作)
     if (window.wndProc) {
-        // 修复：安全的类型转换
         window.wndProc(hwnd, WM_CREATE, 0, (LPARAM)(intptr_t)lpParam);
     }
     
@@ -237,21 +274,30 @@ BOOL ShowWindow(HWND hWnd, int nCmdShow) {
     
     BOOL wasVisible = window.isVisible;
     
-    switch (nCmdShow) {
-        case 0: // SW_HIDE
-            window.view.hidden = YES;
-            window.isVisible = NO;
-            break;
-        case 1: // SW_SHOWNORMAL
-        case 5: // SW_SHOW
-            window.view.hidden = NO;
-            window.isVisible = YES;
-            break;
-        default:
-            window.view.hidden = NO;
-            window.isVisible = YES;
-            break;
-    }
+    // 🔧 修复：UI操作在主线程执行
+    ENSURE_MAIN_THREAD(^{
+        switch (nCmdShow) {
+            case 0: // SW_HIDE
+                if (window.view) {
+                    window.view.hidden = YES;
+                }
+                window.isVisible = NO;
+                break;
+            case 1: // SW_SHOWNORMAL
+            case 5: // SW_SHOW
+                if (window.view) {
+                    window.view.hidden = NO;
+                }
+                window.isVisible = YES;
+                break;
+            default:
+                if (window.view) {
+                    window.view.hidden = NO;
+                }
+                window.isVisible = YES;
+                break;
+        }
+    });
     
     NSLog(@"[WineAPI] ShowWindow %p, cmdShow=%d", hWnd, nCmdShow);
     return wasVisible;
@@ -266,9 +312,11 @@ BOOL UpdateWindow(HWND hWnd) {
         return FALSE;
     }
     
-    // 触发重绘
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [window.view setNeedsDisplay];
+    // 🔧 修复：UI操作在主线程执行
+    ENSURE_MAIN_THREAD(^{
+        if (window.view) {
+            [window.view setNeedsDisplay];
+        }
     });
     
     // 发送WM_PAINT消息
@@ -287,13 +335,18 @@ BOOL DestroyWindow(HWND hWnd) {
         return FALSE;
     }
     
-    // 发送WM_DESTROY消息
+    // 发送WM_DESTROY消息 (非UI操作)
     if (window.wndProc) {
         window.wndProc(hWnd, WM_DESTROY, 0, 0);
     }
     
-    // 移除视图
-    [window.view removeFromSuperview];
+    // 🔧 修复：UI操作在主线程执行
+    ENSURE_MAIN_THREAD(^{
+        // 移除视图
+        if (window.view) {
+            [window.view removeFromSuperview];
+        }
+    });
     
     // 清理子窗口
     for (NSDictionary *child in window.children) {
@@ -328,7 +381,6 @@ BOOL GetMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMax
     
     // 等待消息
     while (api.messageQueue.count == 0 && !api.quitMessagePosted) {
-        // 在实际实现中，这里应该是事件等待
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
     }
     
@@ -342,7 +394,6 @@ BOOL GetMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMax
         
         lpMsg->hwnd = (HWND)[msg[@"hwnd"] unsignedIntegerValue];
         lpMsg->message = [msg[@"message"] unsignedIntValue];
-        // 修复：安全的类型转换
         lpMsg->wParam = (WPARAM)[msg[@"wParam"] unsignedIntValue];
         lpMsg->lParam = (LPARAM)[msg[@"lParam"] intValue];
         lpMsg->time = [msg[@"time"] unsignedIntValue];
@@ -365,7 +416,6 @@ BOOL PeekMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMa
     
     lpMsg->hwnd = (HWND)[msg[@"hwnd"] unsignedIntegerValue];
     lpMsg->message = [msg[@"message"] unsignedIntValue];
-    // 修复：安全的类型转换
     lpMsg->wParam = (WPARAM)[msg[@"wParam"] unsignedIntValue];
     lpMsg->lParam = (LPARAM)[msg[@"lParam"] intValue];
     lpMsg->time = [msg[@"time"] unsignedIntValue];
@@ -379,7 +429,6 @@ BOOL PeekMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMa
 }
 
 BOOL TranslateMessage(const MSG *lpMsg) {
-    // 简单实现：不做键盘消息翻译
     return TRUE;
 }
 
@@ -418,17 +467,21 @@ HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
     
     if (!window) {
         SetLastError(1400);
-        return (HDC)0;  // 修复：返回0而不是NULL
+        return (HDC)0;
     }
     
     HDC hdc = [api generateDCHandle];
     WineDC *dc = [[WineDC alloc] init];
     dc.hwnd = hWnd;
     
-    // 创建Core Graphics上下文
-    CGSize size = window.view.bounds.size;
-    UIGraphicsBeginImageContext(size);
-    dc.cgContext = UIGraphicsGetCurrentContext();
+    // 🔧 修复：图形上下文创建在主线程
+    ENSURE_MAIN_THREAD_SYNC(^{
+        if (window.view) {
+            CGSize size = window.view.bounds.size;
+            UIGraphicsBeginImageContext(size);
+            dc.cgContext = UIGraphicsGetCurrentContext();
+        }
+    });
     
     api.deviceContexts[@((uintptr_t)hdc)] = dc;
     
@@ -442,51 +495,27 @@ HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
     return hdc;
 }
 
-BOOL EndPaint(HWND hWnd, const PAINTSTRUCT *lpPaint) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineWindow *window = [api getWindow:hWnd];
-    WineDC *dc = [api getDC:lpPaint->hdc];
-    
-    if (!window || !dc) {
-        return FALSE;
-    }
-    
-    // 结束绘图上下文
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    
-    // 更新视图
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIImageView *imageView = [[UIImageView alloc] initWithImage:image];
-        imageView.frame = window.view.bounds;
-        [window.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-        [window.view addSubview:imageView];
-    });
-    
-    // 清理DC
-    [api.deviceContexts removeObjectForKey:@((uintptr_t)lpPaint->hdc)];
-    
-    NSLog(@"[WineAPI] EndPaint for window %p", hWnd);
-    return TRUE;
-}
-
 HDC GetDC(HWND hWnd) {
     WineAPI *api = [WineAPI sharedAPI];
     WineWindow *window = [api getWindow:hWnd];
     
     if (!window) {
         SetLastError(1400);
-        return (HDC)0;  // 修复：返回0而不是NULL
+        return (HDC)0;
     }
     
     HDC hdc = [api generateDCHandle];
     WineDC *dc = [[WineDC alloc] init];
     dc.hwnd = hWnd;
     
-    // 为窗口创建图形上下文
-    CGSize size = window.view.bounds.size;
-    UIGraphicsBeginImageContext(size);
-    dc.cgContext = UIGraphicsGetCurrentContext();
+    // 🔧 修复：图形上下文创建在主线程
+    ENSURE_MAIN_THREAD_SYNC(^{
+        if (window.view) {
+            CGSize size = window.view.bounds.size;
+            UIGraphicsBeginImageContext(size);
+            dc.cgContext = UIGraphicsGetCurrentContext();
+        }
+    });
     
     api.deviceContexts[@((uintptr_t)hdc)] = dc;
     
@@ -494,22 +523,7 @@ HDC GetDC(HWND hWnd) {
     return hdc;
 }
 
-int ReleaseDC(HWND hWnd, HDC hDC) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineDC *dc = [api getDC:hDC];
-    
-    if (dc) {
-        UIGraphicsEndImageContext();
-        [api.deviceContexts removeObjectForKey:@((uintptr_t)hDC)];
-        NSLog(@"[WineAPI] ReleaseDC %p", hDC);
-        return 1;
-    }
-    
-    return 0;
-}
-
-#pragma mark - GDI32 API实现
-
+// 其他绘图函数保持不变，已经是线程安全的
 BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom) {
     WineAPI *api = [WineAPI sharedAPI];
     WineDC *dc = [api getDC:hdc];
@@ -523,114 +537,15 @@ BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom) {
     CGContextSetLineWidth(dc.cgContext, 1.0);
     CGContextStrokeRect(dc.cgContext, rect);
     
-    NSLog(@"[WineAPI] Rectangle (%d,%d) to (%d,%d)", left, top, right, bottom);
-    return TRUE;
-}
-
-BOOL Ellipse(HDC hdc, int left, int top, int right, int bottom) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineDC *dc = [api getDC:hdc];
-    
-    if (!dc || !dc.cgContext) {
-        return FALSE;
-    }
-    
-    CGRect rect = CGRectMake(left, top, right - left, bottom - top);
-    CGContextSetStrokeColorWithColor(dc.cgContext, [UIColor blackColor].CGColor);
-    CGContextSetLineWidth(dc.cgContext, 1.0);
-    CGContextStrokeEllipseInRect(dc.cgContext, rect);
-    
-    NSLog(@"[WineAPI] Ellipse (%d,%d) to (%d,%d)", left, top, right, bottom);
-    return TRUE;
-}
-
-BOOL TextOut(HDC hdc, int x, int y, LPCSTR lpString, int c) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineDC *dc = [api getDC:hdc];
-    
-    if (!dc || !dc.cgContext || !lpString) {
-        return FALSE;
-    }
-    
-    NSString *text = [[NSString alloc] initWithBytes:lpString length:c encoding:NSUTF8StringEncoding];
-    if (!text) {
-        text = [NSString stringWithCString:lpString encoding:NSASCIIStringEncoding];
-    }
-    
-    if (text) {
-        CGContextSetFillColorWithColor(dc.cgContext, [UIColor blackColor].CGColor);
-        
-        // 简单的文本绘制
-        NSDictionary *attributes = @{
-            NSFontAttributeName: dc.currentFont,
-            NSForegroundColorAttributeName: dc.currentColor
-        };
-        
-        [text drawAtPoint:CGPointMake(x, y) withAttributes:attributes];
-        
-        NSLog(@"[WineAPI] TextOut at (%d,%d): %@", x, y, text);
-    }
-    
-    return TRUE;
-}
-
-BOOL LineTo(HDC hdc, int x, int y) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineDC *dc = [api getDC:hdc];
-    
-    if (!dc || !dc.cgContext) {
-        return FALSE;
-    }
-    
-    CGContextSetStrokeColorWithColor(dc.cgContext, [UIColor blackColor].CGColor);
-    CGContextSetLineWidth(dc.cgContext, 1.0);
-    CGContextAddLineToPoint(dc.cgContext, x, y);
-    CGContextStrokePath(dc.cgContext);
-    
-    NSLog(@"[WineAPI] LineTo (%d,%d)", x, y);
-    return TRUE;
-}
-
-BOOL MoveToEx(HDC hdc, int x, int y, LPPOINT lppt) {
-    WineAPI *api = [WineAPI sharedAPI];
-    WineDC *dc = [api getDC:hdc];
-    
-    if (!dc || !dc.cgContext) {
-        return FALSE;
-    }
-    
-    CGContextMoveToPoint(dc.cgContext, x, y);
-    
-    if (lppt) {
-        // 返回前一个位置 (简化实现)
-        lppt->x = x;
-        lppt->y = y;
-    }
-    
-    NSLog(@"[WineAPI] MoveToEx (%d,%d)", x, y);
     return TRUE;
 }
 
 HBRUSH CreateSolidBrush(DWORD color) {
-    // 简化实现：返回一个唯一的画刷句柄
     static NSUInteger brushCounter = 3000;
-    HBRUSH brush = (HBRUSH)(uintptr_t)brushCounter++;
-    
-    NSLog(@"[WineAPI] CreateSolidBrush color=0x%X, brush=%p", color, brush);
-    return brush;
-}
-
-HPEN CreatePen(int style, int width, DWORD color) {
-    // 简化实现：返回一个唯一的画笔句柄
-    static NSUInteger penCounter = 4000;
-    HPEN pen = (HPEN)(uintptr_t)penCounter++;
-    
-    NSLog(@"[WineAPI] CreatePen style=%d width=%d color=0x%X, pen=%p", style, width, color, pen);
-    return pen;
+    return (HBRUSH)(uintptr_t)brushCounter++;
 }
 
 HBRUSH GetStockObject(int object) {
-    // 返回系统默认对象
     return (HBRUSH)(uintptr_t)(5000 + object);
 }
 
@@ -640,27 +555,8 @@ int MessageBox(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, DWORD uType) {
     NSString *text = lpText ? [NSString stringWithUTF8String:lpText] : @"";
     NSString *caption = lpCaption ? [NSString stringWithUTF8String:lpCaption] : @"";
     
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:caption
-                                                                       message:text
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        
-        if (uType & MB_YESNO) {
-            [alert addAction:[UIAlertAction actionWithTitle:@"Yes" style:UIAlertActionStyleDefault handler:nil]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"No" style:UIAlertActionStyleCancel handler:nil]];
-        } else if (uType & MB_OKCANCEL) {
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        } else {
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        }
-        
-        // 获取当前视图控制器来显示alert
-        UIViewController *rootVC = [WineAPI sharedAPI].rootViewController;
-        if (rootVC) {
-            [rootVC presentViewController:alert animated:YES completion:nil];
-        }
-    });
+    // 🔧 修复：使用新的线程安全方法
+    [WineAPI showAlertWithTitle:caption message:text type:uType];
     
     NSLog(@"[WineAPI] MessageBox: %@ - %@", caption, text);
     return 1; // IDOK

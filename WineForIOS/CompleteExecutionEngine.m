@@ -1,5 +1,20 @@
 #import "CompleteExecutionEngine.h"
 
+// 线程安全宏定义
+#define ENSURE_MAIN_THREAD(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+#define ENSURE_MAIN_THREAD_SYNC(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_sync(dispatch_get_main_queue(), block); \
+    }
+
 @interface CompleteExecutionEngine()
 @property (nonatomic, strong) IOSJITEngine *jitEngine;
 @property (nonatomic, strong) Box64Engine *box64Engine;
@@ -126,8 +141,6 @@
 }
 
 - (NSData *)createMockKernel32DLL {
-    // 创建模拟的KERNEL32.DLL代码
-    // 这里创建简单的ARM64指令序列，用于处理基础系统调用
     uint32_t instructions[] = {
         0xD503201F,  // NOP
         0xD2800000,  // MOV X0, #0 (GetLastError返回0)
@@ -138,7 +151,6 @@
 }
 
 - (NSData *)createMockUser32DLL {
-    // 创建模拟的USER32.DLL代码
     uint32_t instructions[] = {
         0xD503201F,  // NOP
         0xD2800020,  // MOV X0, #1 (成功返回TRUE)
@@ -149,7 +161,6 @@
 }
 
 - (NSData *)createMockGDI32DLL {
-    // 创建模拟的GDI32.DLL代码
     uint32_t instructions[] = {
         0xD503201F,  // NOP
         0xD2800020,  // MOV X0, #1 (成功返回TRUE)
@@ -238,8 +249,13 @@
     
     [self updateProgress:0.8 status:@"开始执行程序..."];
     
-    // 创建主窗口 (如果是GUI程序)
-    HWND mainWindow = [self createMainWindow];
+    // 🔧 修复：确保创建主窗口在正确线程
+    __block HWND mainWindow = NULL;
+    
+    // 如果是GUI程序，创建主窗口
+    ENSURE_MAIN_THREAD_SYNC(^{
+        mainWindow = [self createMainWindow];
+    });
     
     // 执行PE入口点
     result = [self executePEEntryPoint:peData arguments:arguments];
@@ -310,6 +326,9 @@
 }
 
 - (HWND)createMainWindow {
+    // 🔧 重要：此方法现在只在主线程调用
+    NSLog(@"[CompleteExecutionEngine] Creating main window on thread: %@", [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND");
+    
     // 注册主窗口类
     WNDCLASS wc = {0};
     wc.lpfnWndProc = DefWindowProc;
@@ -321,7 +340,7 @@
         return NULL;
     }
     
-    // 创建主窗口
+    // 创建主窗口 - 现在会在主线程正确创建UI
     HWND hwnd = CreateWindow("WineMainWindow", "Wine Application",
                             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                             100, 100, 400, 300,
@@ -331,6 +350,8 @@
         ShowWindow(hwnd, 1);  // SW_SHOWNORMAL
         UpdateWindow(hwnd);
         NSLog(@"[CompleteExecutionEngine] Created main window: %p", hwnd);
+    } else {
+        NSLog(@"[CompleteExecutionEngine] Failed to create main window");
     }
     
     return hwnd;
@@ -451,11 +472,11 @@
     NSLog(@"[CompleteExecutionEngine] ==============================");
 }
 
-#pragma mark - 委托通知方法
+#pragma mark - 委托通知方法 - 🔧 修复：确保所有UI相关回调在主线程
 
 - (void)notifyStartExecution:(NSString *)programPath {
     if ([self.delegate respondsToSelector:@selector(executionEngine:didStartExecution:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        ENSURE_MAIN_THREAD(^{
             [self.delegate executionEngine:self didStartExecution:programPath];
         });
     }
@@ -463,7 +484,7 @@
 
 - (void)notifyFinishExecution:(NSString *)programPath result:(ExecutionResult)result {
     if ([self.delegate respondsToSelector:@selector(executionEngine:didFinishExecution:result:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        ENSURE_MAIN_THREAD(^{
             [self.delegate executionEngine:self didFinishExecution:programPath result:result];
         });
     }
@@ -471,7 +492,7 @@
 
 - (void)notifyOutput:(NSString *)output {
     if ([self.delegate respondsToSelector:@selector(executionEngine:didReceiveOutput:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        ENSURE_MAIN_THREAD(^{
             [self.delegate executionEngine:self didReceiveOutput:output];
         });
     }
@@ -479,7 +500,7 @@
 
 - (void)notifyError:(NSError *)error {
     if ([self.delegate respondsToSelector:@selector(executionEngine:didEncounterError:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        ENSURE_MAIN_THREAD(^{
             [self.delegate executionEngine:self didEncounterError:error];
         });
     }
@@ -487,7 +508,7 @@
 
 - (void)updateProgress:(float)progress status:(NSString *)status {
     if ([self.delegate respondsToSelector:@selector(executionEngine:didUpdateProgress:status:)]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+        ENSURE_MAIN_THREAD(^{
             [self.delegate executionEngine:self didUpdateProgress:progress status:status];
         });
     }
