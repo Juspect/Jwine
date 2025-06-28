@@ -138,7 +138,7 @@
     
     // 检查Wine库是否加载
     if (!self.wineManager.isLoaded) {
-        if (![self.wineManager loadWineLibraries]) {
+        if (![self.wineManager loadWineLibrariesIfNeeded]) {
             NSError *error = [NSError errorWithDomain:@"ExecutionEngine"
                                                  code:500
                                              userInfo:@{NSLocalizedDescriptionKey: @"Failed to load Wine libraries"}];

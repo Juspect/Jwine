@@ -265,7 +265,7 @@ NS_ASSUME_NONNULL_END
     }
     
     // 尝试加载
-    BOOL loaded = [self.wineManager loadWineLibraries];
+    BOOL loaded = [self.wineManager loadWineLibrariesIfNeeded];
     
     if (!loaded) {
         testCase.result = WineTestResultFailed;

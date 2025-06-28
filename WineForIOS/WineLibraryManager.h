@@ -1,11 +1,11 @@
-// WineLibraryManager.h - 最终修复版本
+// WineLibraryManager.h - 最终修复版本（解决dyld加载问题）
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 typedef struct WineAPI {
-    // Wine核心函数指针 - 修复nullability语法
+    // Wine核心函数指针 - 使用懒加载，避免启动时加载
     void* _Nullable (*_Nullable wine_init)(void);
     int (*_Nullable wine_main)(int argc, char * _Nonnull argv[_Nonnull]);
     void (*_Nullable wine_cleanup)(void);
@@ -33,10 +33,15 @@ typedef struct WineAPI {
 
 + (instancetype _Nonnull)sharedManager;
 
-- (BOOL)loadWineLibraries;
+// 修改：延迟加载，避免启动时自动加载
+- (BOOL)loadWineLibrariesIfNeeded;
 - (void)unloadWineLibraries;
 - (BOOL)initializeWineEnvironment:(NSString * _Nonnull)prefixPath;
 - (int)executeProgram:(NSString * _Nonnull)exePath arguments:(NSArray<NSString *> * _Nullable)arguments;
+
+// 新增：检查库文件是否存在，不实际加载
+- (BOOL)checkWineLibrariesExist;
+- (NSArray<NSString *> * _Nullable)getMissingLibraries;
 
 @end
 

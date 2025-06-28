@@ -6,10 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		4F5FFE7D2E0F8E5500D2784E /* simplified_wine_build.sh in Resources */ = {isa = PBXBuildFile; fileRef = 4F5FFE7C2E0F8D1900D2784E /* simplified_wine_build.sh */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		4F5FFE352E0F0EA500D2784E /* WineForIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WineForIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4F5FFE7C2E0F8D1900D2784E /* simplified_wine_build.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = simplified_wine_build.sh; sourceTree = "<group>"; };
@@ -20,16 +16,36 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				WineLibs/gdi32.dll.so,
+				WineLibs/kernel32.dll.so,
+				WineLibs/libwine.dylib,
+				WineLibs/ntdll.dll.so,
+				WineLibs/user32.dll.so,
 			);
 			target = 4F5FFE342E0F0EA500D2784E /* WineForIOS */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		4F874D0F2E0FD9440093BE02 /* Exceptions for "WineForIOS" folder in "Copy Bundle Resources" phase from "WineForIOS" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 4F5FFE332E0F0EA500D2784E /* Resources */;
+			membershipExceptions = (
+				WineLibs/gdi32.dll.so,
+				WineLibs/kernel32.dll.so,
+				WineLibs/libwine.dylib,
+				WineLibs/ntdll.dll.so,
+				WineLibs/user32.dll.so,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4F5FFE372E0F0EA500D2784E /* WineForIOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				4F5FFE4C2E0F0EA500D2784E /* Exceptions for "WineForIOS" folder in "WineForIOS" target */,
+				4F874D0F2E0FD9440093BE02 /* Exceptions for "WineForIOS" folder in "Copy Bundle Resources" phase from "WineForIOS" target */,
 			);
 			path = WineForIOS;
 			sourceTree = "<group>";
@@ -127,7 +143,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4F5FFE7D2E0F8E5500D2784E /* simplified_wine_build.sh in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -166,8 +181,6 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/WineForIOS/WineLibs",
-					"$(PROJECT_DIR)/WineLibs",
-					"$(PROJECT_DIR)/WineForIOS/WineLibs_副本",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jxon.WineForIOS;
@@ -199,8 +212,6 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/WineForIOS/WineLibs",
-					"$(PROJECT_DIR)/WineLibs",
-					"$(PROJECT_DIR)/WineForIOS/WineLibs_副本",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jxon.WineForIOS;

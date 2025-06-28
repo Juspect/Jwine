@@ -259,27 +259,101 @@
 }
 
 - (void)checkWineLibraries {
-    [self appendToLog:@"检查Wine库..."];
+    [self appendToLog:@"检查Wine库文件..."];
     
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         WineLibraryManager *manager = [WineLibraryManager sharedManager];
-        BOOL loaded = [manager loadWineLibraries];
+        
+        // 只检查文件存在性，不实际加载
+        BOOL exist = [manager checkWineLibrariesExist];
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (loaded) {
-                self.statusLabel.text = @"✅ Wine库已就绪";
+            if (exist) {
+                self.statusLabel.text = @"✅ Wine库已准备就绪";
                 self.statusLabel.textColor = [UIColor systemGreenColor];
                 self.wineVersionLabel.text = [NSString stringWithFormat:@"Wine版本: %@", manager.wineVersion];
                 self.testWineButton.enabled = YES;
-                [self appendToLog:@"Wine库检查完成 - 状态正常"];
+                [self appendToLog:@"Wine库文件检查完成 - 所有文件存在"];
+                [self appendToLog:@"提示: 库文件将在首次使用时加载"];
             } else {
-                self.statusLabel.text = @"❌ Wine库未找到";
+                self.statusLabel.text = @"❌ Wine库文件缺失";
                 self.statusLabel.textColor = [UIColor systemRedColor];
-                self.wineVersionLabel.text = @"请先编译Wine库";
-                [self appendToLog:@"Wine库检查失败 - 请运行编译脚本"];
+                self.wineVersionLabel.text = @"请先运行编译脚本";
+                
+                // 显示缺失的文件
+                NSArray *missingFiles = [manager getMissingLibraries];
+                if (missingFiles.count > 0) {
+                    [self appendToLog:[NSString stringWithFormat:@"缺失文件: %@", [missingFiles componentsJoinedByString:@", "]]];
+                    [self appendToLog:@"解决方案: 运行 ./simplified_wine_build.sh"];
+                    
+                    // 显示修复建议
+                    [self showLibraryMissingAlert:missingFiles];
+                }
             }
         });
     });
+}
+
+// 新增：显示库文件缺失警告
+- (void)showLibraryMissingAlert:(NSArray<NSString *> *)missingFiles {
+    NSString *message = [NSString stringWithFormat:@"检测到以下库文件缺失:\n\n%@\n\n建议解决方案:\n1. 运行 ./simplified_wine_build.sh\n2. 重新构建项目\n3. 检查Bundle资源", [missingFiles componentsJoinedByString:@"\n"]];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Wine库文件缺失"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    
+    UIAlertAction *buildAction = [UIAlertAction actionWithTitle:@"运行编译脚本"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:^(UIAlertAction * _Nonnull action) {
+        [self showBuildInstructions];
+    }];
+    
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"知道了"
+                                                       style:UIAlertActionStyleCancel
+                                                     handler:nil];
+    
+    [alert addAction:buildAction];
+    [alert addAction:okAction];
+    
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// 新增：显示编译说明
+- (void)showBuildInstructions {
+    NSString *instructions = @"请在终端中执行以下步骤:\n\n"
+                            @"1. 打开终端，cd到项目目录\n"
+                            @"2. 运行: chmod +x simplified_wine_build.sh\n"
+                            @"3. 运行: ./simplified_wine_build.sh\n"
+                            @"4. 等待编译完成\n"
+                            @"5. 在Xcode中重新构建项目\n\n"
+                            @"编译完成后，WineLibs文件夹中应包含:\n"
+                            @"• libwine.dylib\n"
+                            @"• ntdll.dll.so\n"
+                            @"• kernel32.dll.so\n"
+                            @"• user32.dll.so\n"
+                            @"• gdi32.dll.so";
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编译Wine库"
+                                                                   message:instructions
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    
+    UIAlertAction *copyAction = [UIAlertAction actionWithTitle:@"复制命令"
+                                                         style:UIAlertActionStyleDefault
+                                                       handler:^(UIAlertAction * _Nonnull action) {
+        UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+        pasteboard.string = @"chmod +x simplified_wine_build.sh && ./simplified_wine_build.sh";
+        
+        [self appendToLog:@"编译命令已复制到剪贴板"];
+    }];
+    
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"确定"
+                                                       style:UIAlertActionStyleCancel
+                                                     handler:nil];
+    
+    [alert addAction:copyAction];
+    [alert addAction:okAction];
+    
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - Actions

@@ -36,7 +36,7 @@
     self.status = WineContainerStatusCreating;
     
     // 先加载Wine库
-    if (![self.wineManager loadWineLibraries]) {
+    if (![self.wineManager loadWineLibrariesIfNeeded]) {
         NSLog(@"Failed to load Wine libraries");
         self.status = WineContainerStatusError;
         return NO;

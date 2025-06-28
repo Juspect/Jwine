@@ -1,12 +1,15 @@
-// WineLibraryManager.m - 修复版本
+// WineLibraryManager.m - 修复版本（解决dyld加载问题）
 #import "WineLibraryManager.h"
 
 @interface WineLibraryManager()
 @property (nonatomic, assign, nullable) void *libwineHandle;
 @property (nonatomic, assign, nullable) void *ntdllHandle;
 @property (nonatomic, assign, nullable) void *kernel32Handle;
+@property (nonatomic, assign, nullable) void *user32Handle;    // 新增
+@property (nonatomic, assign, nullable) void *gdi32Handle;     // 新增
 @property (nonatomic, assign, nullable) WineAPI *wineAPI;
 @property (nonatomic, strong, nullable) NSString *wineLibsPath;
+@property (nonatomic, assign) BOOL librariesExist;            // 缓存检查结果
 @end
 
 @implementation WineLibraryManager
@@ -24,6 +27,7 @@
     self = [super init];
     if (self) {
         _isLoaded = NO;
+        _librariesExist = NO;
         _wineAPI = malloc(sizeof(WineAPI));
         memset(_wineAPI, 0, sizeof(WineAPI));
         
@@ -32,8 +36,18 @@
         _wineLibsPath = [mainBundle pathForResource:@"WineLibs" ofType:nil];
         
         if (!_wineLibsPath) {
-            NSLog(@"[WineLibraryManager] Wine库文件夹未找到");
+            // 尝试其他可能的路径
+            NSString *documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            _wineLibsPath = [documentsPath stringByAppendingPathComponent:@"WineLibs"];
+            
+            if (![[NSFileManager defaultManager] fileExistsAtPath:_wineLibsPath]) {
+                NSLog(@"[WineLibraryManager] Wine库文件夹未找到，将在首次加载时检查");
+                _wineLibsPath = nil;
+            }
         }
+        
+        // 不在初始化时加载库，避免启动时的dyld错误
+        NSLog(@"[WineLibraryManager] 管理器已初始化，延迟加载策略");
     }
     return self;
 }
@@ -43,6 +57,68 @@
     if (_wineAPI) {
         free(_wineAPI);
     }
+}
+
+#pragma mark - 库存在性检查
+
+- (BOOL)checkWineLibrariesExist {
+    if (!_wineLibsPath) {
+        NSLog(@"[WineLibraryManager] Wine库路径未设置");
+        return NO;
+    }
+    
+    NSArray *requiredLibs = @[@"libwine.dylib", @"ntdll.dll.so", @"kernel32.dll.so", @"user32.dll.so", @"gdi32.dll.so"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    for (NSString *lib in requiredLibs) {
+        NSString *libPath = [_wineLibsPath stringByAppendingPathComponent:lib];
+        if (![fm fileExistsAtPath:libPath]) {
+            NSLog(@"[WineLibraryManager] 缺少库文件: %@", lib);
+            _librariesExist = NO;
+            return NO;
+        }
+    }
+    
+    _librariesExist = YES;
+    NSLog(@"[WineLibraryManager] 所有必需库文件已找到");
+    return YES;
+}
+
+- (NSArray<NSString *> *)getMissingLibraries {
+    if (!_wineLibsPath) {
+        return @[@"WineLibs文件夹不存在"];
+    }
+    
+    NSArray *requiredLibs = @[@"libwine.dylib", @"ntdll.dll.so", @"kernel32.dll.so", @"user32.dll.so", @"gdi32.dll.so"];
+    NSMutableArray *missing = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    for (NSString *lib in requiredLibs) {
+        NSString *libPath = [_wineLibsPath stringByAppendingPathComponent:lib];
+        if (![fm fileExistsAtPath:libPath]) {
+            [missing addObject:lib];
+        }
+    }
+    
+    return [missing copy];
+}
+
+#pragma mark - 延迟加载
+
+- (BOOL)loadWineLibrariesIfNeeded {
+    if (_isLoaded) {
+        NSLog(@"[WineLibraryManager] Wine库已加载");
+        return YES;
+    }
+    
+    // 首先检查库文件是否存在
+    if (![self checkWineLibrariesExist]) {
+        NSArray *missing = [self getMissingLibraries];
+        NSLog(@"[WineLibraryManager] 缺少库文件: %@", missing);
+        return NO;
+    }
+    
+    return [self loadWineLibraries];
 }
 
 - (BOOL)loadWineLibraries {
@@ -58,32 +134,29 @@
     
     NSLog(@"[WineLibraryManager] 开始加载Wine库...");
     
-    // 加载libwine.dylib
-    NSString *libwinePath = [_wineLibsPath stringByAppendingPathComponent:@"libwine.dylib"];
-    _libwineHandle = dlopen([libwinePath UTF8String], RTLD_LAZY | RTLD_LOCAL);
-    if (!_libwineHandle) {
-        NSLog(@"[WineLibraryManager] 加载libwine.dylib失败: %s", dlerror());
-        return NO;
-    }
-    NSLog(@"[WineLibraryManager] libwine.dylib加载成功");
+    // 使用RTLD_LAZY | RTLD_LOCAL避免立即解析所有符号
+    const int loadFlags = RTLD_LAZY | RTLD_LOCAL;
     
-    // 加载ntdll.dll.so
-    NSString *ntdllPath = [_wineLibsPath stringByAppendingPathComponent:@"ntdll.dll.so"];
-    _ntdllHandle = dlopen([ntdllPath UTF8String], RTLD_LAZY | RTLD_LOCAL);
-    if (!_ntdllHandle) {
-        NSLog(@"[WineLibraryManager] 加载ntdll.dll.so失败: %s", dlerror());
+    // 按依赖顺序加载
+    if (![self loadLibrary:@"libwine.dylib" handle:&_libwineHandle flags:loadFlags]) {
         return NO;
     }
-    NSLog(@"[WineLibraryManager] ntdll.dll.so加载成功");
     
-    // 加载kernel32.dll.so
-    NSString *kernel32Path = [_wineLibsPath stringByAppendingPathComponent:@"kernel32.dll.so"];
-    _kernel32Handle = dlopen([kernel32Path UTF8String], RTLD_LAZY | RTLD_LOCAL);
-    if (!_kernel32Handle) {
-        NSLog(@"[WineLibraryManager] 加载kernel32.dll.so失败: %s", dlerror());
+    if (![self loadLibrary:@"ntdll.dll.so" handle:&_ntdllHandle flags:loadFlags]) {
         return NO;
     }
-    NSLog(@"[WineLibraryManager] kernel32.dll.so加载成功");
+    
+    if (![self loadLibrary:@"kernel32.dll.so" handle:&_kernel32Handle flags:loadFlags]) {
+        return NO;
+    }
+    
+    if (![self loadLibrary:@"user32.dll.so" handle:&_user32Handle flags:loadFlags]) {
+        return NO;
+    }
+    
+    if (![self loadLibrary:@"gdi32.dll.so" handle:&_gdi32Handle flags:loadFlags]) {
+        return NO;
+    }
     
     // 获取函数指针
     if (![self loadWineFunctions]) {
@@ -97,10 +170,24 @@
     return YES;
 }
 
+- (BOOL)loadLibrary:(NSString *)libraryName handle:(void **)handle flags:(int)flags {
+    NSString *libPath = [_wineLibsPath stringByAppendingPathComponent:libraryName];
+    
+    *handle = dlopen([libPath UTF8String], flags);
+    if (!*handle) {
+        const char *error = dlerror();
+        NSLog(@"[WineLibraryManager] 加载%@失败: %s", libraryName, error ? error : "未知错误");
+        return NO;
+    }
+    
+    NSLog(@"[WineLibraryManager] %@加载成功", libraryName);
+    return YES;
+}
+
 - (BOOL)loadWineFunctions {
     NSLog(@"[WineLibraryManager] 获取Wine函数指针...");
     
-    // 从libwine获取核心函数
+    // 从libwine获取核心函数（可能不存在，使用系统函数作为后备）
     _wineAPI->wine_init = dlsym(_libwineHandle, "wine_init");
     _wineAPI->wine_main = dlsym(_libwineHandle, "wine_main");
     _wineAPI->wine_cleanup = dlsym(_libwineHandle, "wine_cleanup");
@@ -155,6 +242,16 @@
         _wineAPI->wine_cleanup();
     }
     
+    if (_gdi32Handle) {
+        dlclose(_gdi32Handle);
+        _gdi32Handle = NULL;
+    }
+    
+    if (_user32Handle) {
+        dlclose(_user32Handle);
+        _user32Handle = NULL;
+    }
+    
     if (_kernel32Handle) {
         dlclose(_kernel32Handle);
         _kernel32Handle = NULL;
@@ -177,8 +274,8 @@
 }
 
 - (BOOL)initializeWineEnvironment:(NSString *)prefixPath {
-    if (!_isLoaded) {
-        NSLog(@"[WineLibraryManager] Wine库未加载");
+    if (![self loadWineLibrariesIfNeeded]) {
+        NSLog(@"[WineLibraryManager] Wine库加载失败");
         return NO;
     }
     
@@ -203,8 +300,8 @@
 }
 
 - (int)executeProgram:(NSString *)exePath arguments:(NSArray<NSString *> *)arguments {
-    if (!_isLoaded) {
-        NSLog(@"[WineLibraryManager] Wine库未加载");
+    if (![self loadWineLibrariesIfNeeded]) {
+        NSLog(@"[WineLibraryManager] Wine库加载失败");
         return -1;
     }
     
@@ -251,8 +348,11 @@
 - (NSString *)wineVersion {
     // 读取配置文件获取版本信息
     NSString *configPath = [_wineLibsPath stringByAppendingPathComponent:@"wine_config.plist"];
-    NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
-    return config[@"WineVersion"] ?: @"Unknown";
+    if ([[NSFileManager defaultManager] fileExistsAtPath:configPath]) {
+        NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
+        return config[@"WineVersion"] ?: @"Unknown";
+    }
+    return @"8.0-ios-stub";
 }
 
 @end

@@ -61,7 +61,7 @@
     
     <!-- 最低iOS版本 -->
     <key>MinimumOSVersion</key>
-    <string>16.0</string>
+    <string>16.6</string>
     
     <!-- 支持的设备 -->
     <key>UIRequiredDeviceCapabilities</key>
