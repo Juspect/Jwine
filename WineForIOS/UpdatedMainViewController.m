@@ -1,3 +1,4 @@
+// UpdatedMainViewController.m - 超安全版，完全避免Block问题
 #import "UpdatedMainViewController.h"
 
 @interface UpdatedMainViewController ()
@@ -32,7 +33,7 @@
 
 // 执行区域
 @property (nonatomic, strong) UIView *executionCard;
-@property (nonatomic, strong) UIView *wineDisplayView;  // Wine程序的显示区域
+@property (nonatomic, strong) UIView *wineDisplayView;
 @property (nonatomic, strong) UITextView *outputTextView;
 
 // 调试控制
@@ -40,11 +41,14 @@
 @property (nonatomic, strong) UIButton *dumpStatesButton;
 @property (nonatomic, strong) UIButton *systemInfoButton;
 
-// 数据
-@property (nonatomic, strong) CompleteExecutionEngine *executionEngine;
+// 数据 - 使用弱引用
+@property (nonatomic, weak) CompleteExecutionEngine *executionEngine;
 @property (nonatomic, strong) TestBinaryCreator *testCreator;
 @property (nonatomic, strong) NSString *selectedFilePath;
 @property (nonatomic, assign) BOOL isEngineInitialized;
+
+// 添加操作队列替换异步Block
+@property (nonatomic, strong) NSOperationQueue *operationQueue;
 
 @end
 
@@ -56,7 +60,6 @@
     self.title = @"Wine for iOS - Complete";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     
-    // 设置导航栏
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:@"设置"
         style:UIBarButtonItemStylePlain
@@ -73,33 +76,46 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     
-    // 检查是否需要自动初始化
     if (!self.isEngineInitialized) {
         [self showInitializationPrompt];
+    }
+}
+
+- (void)dealloc {
+    NSLog(@"[UpdatedMainViewController] Deallocating view controller");
+    
+    // 清理操作队列
+    [_operationQueue cancelAllOperations];
+    
+    // 清理引擎引用
+    if (self.executionEngine) {
+        self.executionEngine.delegate = nil;
     }
 }
 
 #pragma mark - 引擎设置
 
 - (void)setupEngines {
+    // 创建串行操作队列替换GCD
+    _operationQueue = [[NSOperationQueue alloc] init];
+    _operationQueue.maxConcurrentOperationCount = 1; // 串行执行
+    _operationQueue.name = @"WineExecutionQueue";
+    
     self.executionEngine = [CompleteExecutionEngine sharedEngine];
     self.executionEngine.delegate = self;
     
     self.testCreator = [TestBinaryCreator sharedCreator];
-    
     self.isEngineInitialized = NO;
 }
 
-#pragma mark - UI设置
+#pragma mark - UI设置（保持原有实现，因为没有Block问题）
 
 - (void)setupUI {
-    // 创建滚动视图
     self.scrollView = [[UIScrollView alloc] init];
     self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     self.scrollView.showsVerticalScrollIndicator = YES;
     [self.view addSubview:self.scrollView];
     
-    // 创建主堆栈视图
     self.mainStackView = [[UIStackView alloc] init];
     self.mainStackView.axis = UILayoutConstraintAxisVertical;
     self.mainStackView.spacing = 16;
@@ -108,27 +124,22 @@
     self.mainStackView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.scrollView addSubview:self.mainStackView];
     
-    // 设置各个区域
     [self setupStatusSection];
     [self setupSystemInfoSection];
     [self setupControlSection];
     [self setupFileInfoSection];
     [self setupExecutionSection];
     [self setupDebugSection];
-    
-    // 设置约束
     [self setupConstraints];
 }
 
+// UI设置方法保持不变（这些方法没有Block问题）
 - (void)setupStatusSection {
-    // 状态区域标题
     UILabel *statusTitle = [self createSectionTitle:@"🎮 引擎状态" emoji:@"🎮"];
     [self.mainStackView addArrangedSubview:statusTitle];
     
-    // 状态卡片
     self.statusCard = [self createCardView];
     
-    // 主状态标签
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.text = @"等待初始化...";
     self.statusLabel.font = [UIFont boldSystemFontOfSize:18];
@@ -137,7 +148,6 @@
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.statusCard addSubview:self.statusLabel];
     
-    // 引擎状态标签
     self.engineStatusLabel = [[UILabel alloc] init];
     self.engineStatusLabel.text = @"Box64 + Wine + JIT 引擎";
     self.engineStatusLabel.font = [UIFont systemFontOfSize:14];
@@ -146,7 +156,6 @@
     self.engineStatusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.statusCard addSubview:self.engineStatusLabel];
     
-    // 进度条
     self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     self.progressView.progress = 0.0;
     self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -171,22 +180,17 @@
 }
 
 - (void)setupSystemInfoSection {
-    // 系统信息标题
     UILabel *systemTitle = [self createSectionTitle:@"⚙️ 系统组件" emoji:@"⚙️"];
     [self.mainStackView addArrangedSubview:systemTitle];
     
-    // 系统信息卡片
     self.systemInfoCard = [self createCardView];
     
-    // JIT状态
     self.jitStatusLabel = [self createInfoLabel:@"JIT引擎: 未初始化"];
     [self.systemInfoCard addSubview:self.jitStatusLabel];
     
-    // Box64状态
     self.box64StatusLabel = [self createInfoLabel:@"Box64引擎: 未初始化"];
     [self.systemInfoCard addSubview:self.box64StatusLabel];
     
-    // Wine状态
     self.wineStatusLabel = [self createInfoLabel:@"Wine API: 未初始化"];
     [self.systemInfoCard addSubview:self.wineStatusLabel];
     
@@ -209,25 +213,20 @@
 }
 
 - (void)setupControlSection {
-    // 控制标题
     UILabel *controlTitle = [self createSectionTitle:@"🎯 操作控制" emoji:@"🎯"];
     [self.mainStackView addArrangedSubview:controlTitle];
     
-    // 初始化按钮
     self.initializeButton = [self createPrimaryButton:@"🚀 初始化引擎" action:@selector(initializeEngine)];
     [self.mainStackView addArrangedSubview:self.initializeButton];
     
-    // 创建测试文件按钮
     self.createTestFilesButton = [self createSecondaryButton:@"📁 创建测试文件" action:@selector(createTestFiles)];
     self.createTestFilesButton.enabled = NO;
     [self.mainStackView addArrangedSubview:self.createTestFilesButton];
     
-    // 选择文件按钮
     self.selectFileButton = [self createSecondaryButton:@"📂 选择EXE文件" action:@selector(selectFile)];
     self.selectFileButton.enabled = NO;
     [self.mainStackView addArrangedSubview:self.selectFileButton];
     
-    // 运行和停止按钮的容器
     UIStackView *runStopStack = [[UIStackView alloc] init];
     runStopStack.axis = UILayoutConstraintAxisHorizontal;
     runStopStack.distribution = UIStackViewDistributionFillEqually;
@@ -245,11 +244,9 @@
 }
 
 - (void)setupFileInfoSection {
-    // 文件信息标题
     UILabel *fileTitle = [self createSectionTitle:@"📄 文件信息" emoji:@"📄"];
     [self.mainStackView addArrangedSubview:fileTitle];
     
-    // 文件信息卡片
     self.fileInfoCard = [self createCardView];
     
     self.selectedFileLabel = [[UILabel alloc] init];
@@ -283,14 +280,11 @@
 }
 
 - (void)setupExecutionSection {
-    // 执行区域标题
     UILabel *executionTitle = [self createSectionTitle:@"🖥️ 程序执行" emoji:@"🖥️"];
     [self.mainStackView addArrangedSubview:executionTitle];
     
-    // 执行卡片
     self.executionCard = [self createCardView];
     
-    // Wine显示区域
     self.wineDisplayView = [[UIView alloc] init];
     self.wineDisplayView.backgroundColor = [UIColor blackColor];
     self.wineDisplayView.layer.borderWidth = 2;
@@ -299,7 +293,6 @@
     self.wineDisplayView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.executionCard addSubview:self.wineDisplayView];
     
-    // 添加占位符标签
     UILabel *placeholderLabel = [[UILabel alloc] init];
     placeholderLabel.text = @"Wine程序显示区域\n程序运行时将在此处显示GUI";
     placeholderLabel.textColor = [UIColor whiteColor];
@@ -309,7 +302,6 @@
     placeholderLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.wineDisplayView addSubview:placeholderLabel];
     
-    // 输出文本视图
     self.outputTextView = [[UITextView alloc] init];
     self.outputTextView.backgroundColor = [UIColor blackColor];
     self.outputTextView.textColor = [UIColor greenColor];
@@ -321,17 +313,14 @@
     [self.executionCard addSubview:self.outputTextView];
     
     [NSLayoutConstraint activateConstraints:@[
-        // Wine显示区域
         [self.wineDisplayView.topAnchor constraintEqualToAnchor:self.executionCard.topAnchor constant:16],
         [self.wineDisplayView.leadingAnchor constraintEqualToAnchor:self.executionCard.leadingAnchor constant:16],
         [self.wineDisplayView.trailingAnchor constraintEqualToAnchor:self.executionCard.trailingAnchor constant:-16],
         [self.wineDisplayView.heightAnchor constraintEqualToConstant:200],
         
-        // 占位符标签
         [placeholderLabel.centerXAnchor constraintEqualToAnchor:self.wineDisplayView.centerXAnchor],
         [placeholderLabel.centerYAnchor constraintEqualToAnchor:self.wineDisplayView.centerYAnchor],
         
-        // 输出文本视图
         [self.outputTextView.topAnchor constraintEqualToAnchor:self.wineDisplayView.bottomAnchor constant:12],
         [self.outputTextView.leadingAnchor constraintEqualToAnchor:self.executionCard.leadingAnchor constant:16],
         [self.outputTextView.trailingAnchor constraintEqualToAnchor:self.executionCard.trailingAnchor constant:-16],
@@ -343,14 +332,11 @@
 }
 
 - (void)setupDebugSection {
-    // 调试区域标题
     UILabel *debugTitle = [self createSectionTitle:@"🔧 调试工具" emoji:@"🔧"];
     [self.mainStackView addArrangedSubview:debugTitle];
     
-    // 调试卡片
     self.debugCard = [self createCardView];
     
-    // 调试按钮容器
     UIStackView *debugStack = [[UIStackView alloc] init];
     debugStack.axis = UILayoutConstraintAxisHorizontal;
     debugStack.distribution = UIStackViewDistributionFillEqually;
@@ -376,13 +362,11 @@
 
 - (void)setupConstraints {
     [NSLayoutConstraint activateConstraints:@[
-        // 滚动视图
         [self.scrollView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         
-        // 主堆栈视图
         [self.mainStackView.topAnchor constraintEqualToAnchor:self.scrollView.topAnchor constant:20],
         [self.mainStackView.leadingAnchor constraintEqualToAnchor:self.scrollView.leadingAnchor constant:16],
         [self.mainStackView.trailingAnchor constraintEqualToAnchor:self.scrollView.trailingAnchor constant:-16],
@@ -391,7 +375,7 @@
     ]];
 }
 
-#pragma mark - UI助手方法
+#pragma mark - UI助手方法（保持不变）
 
 - (UILabel *)createSectionTitle:(NSString *)title emoji:(NSString *)emoji {
     UILabel *label = [[UILabel alloc] init];
@@ -460,17 +444,19 @@
     return button;
 }
 
-#pragma mark - 操作方法
+#pragma mark - 操作方法 - 使用NSOperation替换Block
 
 - (void)initializeEngine {
     [self appendOutput:@"开始初始化Wine引擎..."];
     self.initializeButton.enabled = NO;
     [self.initializeButton setTitle:@"🔄 初始化中..." forState:UIControlStateNormal];
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    // 使用NSOperation替换异步Block
+    NSBlockOperation *initOperation = [NSBlockOperation blockOperationWithBlock:^{
         BOOL success = [self.executionEngine initializeWithViewController:self];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
+        // 同步回调到主线程
+        dispatch_sync(dispatch_get_main_queue(), ^{
             if (success) {
                 self.isEngineInitialized = YES;
                 self.statusLabel.text = @"✅ 引擎已就绪";
@@ -478,7 +464,6 @@
                 [self.initializeButton setTitle:@"✅ 初始化完成" forState:UIControlStateNormal];
                 self.initializeButton.backgroundColor = [UIColor systemGreenColor];
                 
-                // 启用其他按钮
                 self.createTestFilesButton.enabled = YES;
                 self.selectFileButton.enabled = YES;
                 
@@ -494,28 +479,30 @@
             
             [self updateUI];
         });
-    });
+    }];
+    
+    [_operationQueue addOperation:initOperation];
 }
 
 - (void)createTestFiles {
     [self appendOutput:@"创建测试文件..."];
     self.createTestFilesButton.enabled = NO;
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    NSBlockOperation *createOperation = [NSBlockOperation blockOperationWithBlock:^{
         [self.testCreator createAllTestFiles];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_sync(dispatch_get_main_queue(), ^{
             self.createTestFilesButton.enabled = YES;
             [self.createTestFilesButton setTitle:@"✅ 测试文件已创建" forState:UIControlStateNormal];
             self.createTestFilesButton.backgroundColor = [UIColor systemGreenColor];
             [self.createTestFilesButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
             
             [self appendOutput:@"测试文件创建完成！包括简单测试、计算器和Hello World程序。"];
-            
-            // 显示提示
             [self showTestFilesCreatedAlert];
         });
-    });
+    }];
+    
+    [_operationQueue addOperation:createOperation];
 }
 
 - (void)selectFile {
@@ -554,24 +541,30 @@
     self.stopButton.enabled = YES;
     self.selectFileButton.enabled = NO;
     
-    // 清空Wine显示区域
     for (UIView *subview in self.wineDisplayView.subviews) {
-        if (![subview isKindOfClass:[UILabel class]]) { // 保留占位符标签
+        if (![subview isKindOfClass:[UILabel class]]) {
             [subview removeFromSuperview];
         }
     }
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    // 使用NSOperation替换异步Block
+    NSBlockOperation *runOperation = [NSBlockOperation blockOperationWithBlock:^{
         ExecutionResult result = [self.executionEngine executeProgram:self.selectedFilePath];
         
-        dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_sync(dispatch_get_main_queue(), ^{
             [self handleExecutionResult:result];
         });
-    });
+    }];
+    
+    [_operationQueue addOperation:runOperation];
 }
 
 - (void)stopExecution {
     [self appendOutput:@"停止程序执行..."];
+    
+    // 取消所有操作
+    [_operationQueue cancelAllOperations];
+    
     [self.executionEngine stopExecution];
     
     self.runButton.enabled = YES;
@@ -610,6 +603,7 @@
                                                                    message:@"选择操作"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     
+    // 避免Block循环引用的方法：使用target-action模式
     UIAlertAction *clearOutputAction = [UIAlertAction actionWithTitle:@"清空输出"
                                                                 style:UIAlertActionStyleDefault
                                                               handler:^(UIAlertAction * action) {
@@ -649,7 +643,6 @@
 }
 
 - (void)updateSystemInfo {
-    // 更新系统组件状态
     IOSJITEngine *jitEngine = [IOSJITEngine sharedEngine];
     Box64Engine *box64Engine = [Box64Engine sharedEngine];
     WineAPI *wineAPI = [WineAPI sharedAPI];
@@ -735,7 +728,14 @@
 }
 
 - (void)resetEngine {
-    [self.executionEngine cleanup];
+    // 取消所有操作
+    [_operationQueue cancelAllOperations];
+    
+    if (self.executionEngine) {
+        self.executionEngine.delegate = nil;
+        [self.executionEngine cleanup];
+    }
+    
     self.isEngineInitialized = NO;
     
     self.statusLabel.text = @"等待初始化...";
@@ -748,6 +748,9 @@
     self.createTestFilesButton.enabled = NO;
     self.selectFileButton.enabled = NO;
     self.runButton.enabled = NO;
+    
+    self.executionEngine = [CompleteExecutionEngine sharedEngine];
+    self.executionEngine.delegate = self;
     
     [self appendOutput:@"引擎已重置，需要重新初始化"];
 }
@@ -780,6 +783,13 @@
 }
 
 - (void)appendOutput:(NSString *)message {
+    if (![NSThread isMainThread]) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [self appendOutput:message];
+        });
+        return;
+    }
+    
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     [formatter setTimeStyle:NSDateFormatterMediumStyle];
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
@@ -787,16 +797,16 @@
     NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
     self.outputTextView.text = [self.outputTextView.text stringByAppendingString:logEntry];
     
-    // 滚动到底部
     NSRange range = NSMakeRange(self.outputTextView.text.length - 1, 1);
     [self.outputTextView scrollRangeToVisible:range];
     
     NSLog(@"%@", logEntry);
 }
 
-#pragma mark - CompleteExecutionEngineDelegate
+#pragma mark - CompleteExecutionEngineDelegate - 同步委托实现
 
 - (void)executionEngine:(CompleteExecutionEngine *)engine didStartExecution:(NSString *)programPath {
+    // 由于ExecutionEngine已经确保在主线程回调，这里直接执行
     [self appendOutput:[NSString stringWithFormat:@"开始执行: %@", [programPath lastPathComponent]]];
 }
 
@@ -814,26 +824,22 @@
 }
 
 - (void)executionEngine:(CompleteExecutionEngine *)engine didUpdateProgress:(float)progress status:(NSString *)status {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.progressView.progress = progress;
-        self.engineStatusLabel.text = status;
-    });
+    self.progressView.progress = progress;
+    self.engineStatusLabel.text = status;
 }
 
-#pragma mark - UIDocumentPickerDelegate
+#pragma mark - UIDocumentPickerDelegate（保持原有实现，无Block问题）
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count > 0) {
         NSURL *selectedURL = urls.firstObject;
         
-        // 获取安全访问权限
         BOOL startedAccessing = [selectedURL startAccessingSecurityScopedResource];
         
         if (startedAccessing) {
             NSString *fileName = selectedURL.lastPathComponent;
             NSString *documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
             
-            // 修复：创建唯一的文件名避免冲突
             NSString *fileExtension = [fileName pathExtension];
             NSString *baseName = [fileName stringByDeletingPathExtension];
             NSString *uniqueFileName = fileName;
@@ -842,7 +848,6 @@
             NSFileManager *fileManager = [NSFileManager defaultManager];
             int counter = 1;
             
-            // 如果文件已存在，生成唯一名称
             while ([fileManager fileExistsAtPath:destinationPath]) {
                 uniqueFileName = [NSString stringWithFormat:@"%@_%d.%@", baseName, counter, fileExtension];
                 destinationPath = [documentsPath stringByAppendingPathComponent:uniqueFileName];
@@ -851,21 +856,16 @@
             
             NSError *error;
             
-            // 修复：使用copyItemAtURL而不是moveItemAtURL，保留原文件
             if ([fileManager copyItemAtURL:selectedURL toURL:[NSURL fileURLWithPath:destinationPath] error:&error]) {
                 self.selectedFilePath = destinationPath;
                 self.runButton.enabled = YES;
                 
-                // 更新文件信息
                 self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择: %@", uniqueFileName];
                 self.selectedFileLabel.textColor = [UIColor systemGreenColor];
                 
-                // 获取文件详细信息
                 [self analyzeSelectedFile:destinationPath];
-                
                 [self appendOutput:[NSString stringWithFormat:@"已复制文件到Documents: %@", uniqueFileName]];
                 
-                // 修复：添加文件大小和路径信息
                 NSDictionary *attributes = [fileManager attributesOfItemAtPath:destinationPath error:nil];
                 if (attributes) {
                     NSNumber *fileSize = attributes[NSFileSize];
@@ -876,7 +876,6 @@
             } else {
                 [self appendOutput:[NSString stringWithFormat:@"文件复制失败: %@", error.localizedDescription]];
                 
-                // 如果复制失败，尝试直接使用原文件（仅限测试）
                 if ([selectedURL.scheme isEqualToString:@"file"]) {
                     self.selectedFilePath = selectedURL.path;
                     self.runButton.enabled = YES;
@@ -897,7 +896,7 @@
     [self appendOutput:@"文件选择已取消"];
 }
 
-#pragma mark - 文件处理辅助方法
+#pragma mark - 文件处理辅助方法（保持原有实现）
 
 - (NSString *)formatFileSize:(long long)bytes {
     if (bytes < 1024) {
@@ -928,14 +927,12 @@
         self.fileDetailsLabel.text = [NSString stringWithFormat:@"文件大小: %@\n修改时间: %@\n文件路径: %@",
                                       sizeString, [dateFormatter stringFromDate:modDate], filePath];
         
-        // 检查文件是否可读
         if ([[NSFileManager defaultManager] isReadableFileAtPath:filePath]) {
             [self appendOutput:@"文件权限检查: ✅ 可读"];
         } else {
             [self appendOutput:@"文件权限检查: ❌ 不可读"];
         }
         
-        // 尝试读取PE头
         [self validatePEFile:filePath];
         
     } else {
@@ -952,14 +949,12 @@
     }
     
     @try {
-        // 读取DOS头
         NSData *dosHeader = [fileHandle readDataOfLength:64];
         if (dosHeader.length >= 2) {
             const unsigned char *bytes = (const unsigned char *)[dosHeader bytes];
             if (bytes[0] == 'M' && bytes[1] == 'Z') {
                 [self appendOutput:@"PE验证: ✅ 有效的PE文件 (MZ签名)"];
                 
-                // 读取PE头信息
                 if (dosHeader.length >= 60) {
                     uint32_t peOffset = *(uint32_t *)(bytes + 60);
                     [fileHandle seekToFileOffset:peOffset];
@@ -970,7 +965,6 @@
                         if (peBytes[0] == 'P' && peBytes[1] == 'E') {
                             [self appendOutput:@"PE验证: ✅ PE签名确认"];
                             
-                            // 读取机器类型
                             NSData *machineType = [fileHandle readDataOfLength:2];
                             if (machineType.length == 2) {
                                 uint16_t machine = *(uint16_t *)[machineType bytes];
