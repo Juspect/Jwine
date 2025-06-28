@@ -1,4 +1,6 @@
 #import "WineAPI.h"
+#import <pthread.h>  // 确保包含pthread头文件
+#import <unistd.h>   // 包含getpid函数
 
 @implementation WineWindow
 - (instancetype)init {
@@ -114,7 +116,10 @@ void SetLastError(DWORD error) {
 }
 
 DWORD GetCurrentThreadId(void) {
-    return (DWORD)pthread_self();
+    // 修复：使用pthread_self()获取线程ID，并正确转换类型
+    pthread_t thread = pthread_self();
+    // 将pthread_t转换为DWORD，取地址的低32位
+    return (DWORD)((uintptr_t)thread & 0xFFFFFFFF);
 }
 
 DWORD GetCurrentProcessId(void) {
@@ -155,7 +160,7 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     
     if (!lpClassName) {
         SetLastError(87); // ERROR_INVALID_PARAMETER
-        return NULL;
+        return (HWND)0;  // 修复：返回0而不是NULL
     }
     
     WineAPI *api = [WineAPI sharedAPI];
@@ -166,7 +171,7 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     if (!classInfo) {
         NSLog(@"[WineAPI] Window class not found: %@", className);
         SetLastError(1407); // ERROR_CLASS_DOES_NOT_EXIST
-        return NULL;
+        return (HWND)0;  // 修复：返回0而不是NULL
     }
     
     // 创建Wine窗口对象
@@ -214,7 +219,8 @@ HWND CreateWindow(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
     
     // 发送WM_CREATE消息
     if (window.wndProc) {
-        window.wndProc(hwnd, WM_CREATE, 0, (LPARAM)lpParam);
+        // 修复：安全的类型转换
+        window.wndProc(hwnd, WM_CREATE, 0, (LPARAM)(intptr_t)lpParam);
     }
     
     return hwnd;
@@ -336,8 +342,9 @@ BOOL GetMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMax
         
         lpMsg->hwnd = (HWND)[msg[@"hwnd"] unsignedIntegerValue];
         lpMsg->message = [msg[@"message"] unsignedIntValue];
-        lpMsg->wParam = [msg[@"wParam"] unsignedIntegerValue];
-        lpMsg->lParam = [msg[@"lParam"] integerValue];
+        // 修复：安全的类型转换
+        lpMsg->wParam = (WPARAM)[msg[@"wParam"] unsignedIntValue];
+        lpMsg->lParam = (LPARAM)[msg[@"lParam"] intValue];
         lpMsg->time = [msg[@"time"] unsignedIntValue];
         lpMsg->pt = (POINT){0, 0};
         
@@ -358,8 +365,9 @@ BOOL PeekMessage(LPMSG lpMsg, HWND hWnd, DWORD wMsgFilterMin, DWORD wMsgFilterMa
     
     lpMsg->hwnd = (HWND)[msg[@"hwnd"] unsignedIntegerValue];
     lpMsg->message = [msg[@"message"] unsignedIntValue];
-    lpMsg->wParam = [msg[@"wParam"] unsignedIntegerValue];
-    lpMsg->lParam = [msg[@"lParam"] integerValue];
+    // 修复：安全的类型转换
+    lpMsg->wParam = (WPARAM)[msg[@"wParam"] unsignedIntValue];
+    lpMsg->lParam = (LPARAM)[msg[@"lParam"] intValue];
     lpMsg->time = [msg[@"time"] unsignedIntValue];
     lpMsg->pt = (POINT){0, 0};
     
@@ -410,7 +418,7 @@ HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
     
     if (!window) {
         SetLastError(1400);
-        return NULL;
+        return (HDC)0;  // 修复：返回0而不是NULL
     }
     
     HDC hdc = [api generateDCHandle];
@@ -468,7 +476,7 @@ HDC GetDC(HWND hWnd) {
     
     if (!window) {
         SetLastError(1400);
-        return NULL;
+        return (HDC)0;  // 修复：返回0而不是NULL
     }
     
     HDC hdc = [api generateDCHandle];

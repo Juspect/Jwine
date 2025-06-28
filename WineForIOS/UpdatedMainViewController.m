@@ -826,39 +826,89 @@
     if (urls.count > 0) {
         NSURL *selectedURL = urls.firstObject;
         
+        // 获取安全访问权限
         BOOL startedAccessing = [selectedURL startAccessingSecurityScopedResource];
         
         if (startedAccessing) {
             NSString *fileName = selectedURL.lastPathComponent;
             NSString *documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-            NSString *destinationPath = [documentsPath stringByAppendingPathComponent:fileName];
+            
+            // 修复：创建唯一的文件名避免冲突
+            NSString *fileExtension = [fileName pathExtension];
+            NSString *baseName = [fileName stringByDeletingPathExtension];
+            NSString *uniqueFileName = fileName;
+            NSString *destinationPath = [documentsPath stringByAppendingPathComponent:uniqueFileName];
+            
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            int counter = 1;
+            
+            // 如果文件已存在，生成唯一名称
+            while ([fileManager fileExistsAtPath:destinationPath]) {
+                uniqueFileName = [NSString stringWithFormat:@"%@_%d.%@", baseName, counter, fileExtension];
+                destinationPath = [documentsPath stringByAppendingPathComponent:uniqueFileName];
+                counter++;
+            }
             
             NSError *error;
-            [[NSFileManager defaultManager] removeItemAtPath:destinationPath error:nil];
             
-            if ([[NSFileManager defaultManager] copyItemAtURL:selectedURL toURL:[NSURL fileURLWithPath:destinationPath] error:&error]) {
+            // 修复：使用copyItemAtURL而不是moveItemAtURL，保留原文件
+            if ([fileManager copyItemAtURL:selectedURL toURL:[NSURL fileURLWithPath:destinationPath] error:&error]) {
                 self.selectedFilePath = destinationPath;
                 self.runButton.enabled = YES;
                 
                 // 更新文件信息
-                self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择: %@", fileName];
+                self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择: %@", uniqueFileName];
                 self.selectedFileLabel.textColor = [UIColor systemGreenColor];
                 
                 // 获取文件详细信息
                 [self analyzeSelectedFile:destinationPath];
                 
-                [self appendOutput:[NSString stringWithFormat:@"已选择文件: %@", fileName]];
+                [self appendOutput:[NSString stringWithFormat:@"已复制文件到Documents: %@", uniqueFileName]];
+                
+                // 修复：添加文件大小和路径信息
+                NSDictionary *attributes = [fileManager attributesOfItemAtPath:destinationPath error:nil];
+                if (attributes) {
+                    NSNumber *fileSize = attributes[NSFileSize];
+                    [self appendOutput:[NSString stringWithFormat:@"文件大小: %@", [self formatFileSize:fileSize.longLongValue]]];
+                    [self appendOutput:[NSString stringWithFormat:@"保存路径: %@", destinationPath]];
+                }
+                
             } else {
                 [self appendOutput:[NSString stringWithFormat:@"文件复制失败: %@", error.localizedDescription]];
+                
+                // 如果复制失败，尝试直接使用原文件（仅限测试）
+                if ([selectedURL.scheme isEqualToString:@"file"]) {
+                    self.selectedFilePath = selectedURL.path;
+                    self.runButton.enabled = YES;
+                    self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择（原位置）: %@", fileName];
+                    self.selectedFileLabel.textColor = [UIColor systemOrangeColor];
+                    [self appendOutput:@"警告: 使用原文件位置，可能在应用重启后丢失访问权限"];
+                }
             }
             
             [selectedURL stopAccessingSecurityScopedResource];
+        } else {
+            [self appendOutput:@"无法获取文件访问权限"];
         }
     }
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
     [self appendOutput:@"文件选择已取消"];
+}
+
+#pragma mark - 文件处理辅助方法
+
+- (NSString *)formatFileSize:(long long)bytes {
+    if (bytes < 1024) {
+        return [NSString stringWithFormat:@"%lld B", bytes];
+    } else if (bytes < 1024 * 1024) {
+        return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
+    } else if (bytes < 1024 * 1024 * 1024) {
+        return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
+    } else {
+        return [NSString stringWithFormat:@"%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+    }
 }
 
 - (void)analyzeSelectedFile:(NSString *)filePath {
@@ -869,23 +919,90 @@
         NSNumber *fileSize = attributes[NSFileSize];
         NSDate *modDate = attributes[NSFileModificationDate];
         
-        NSString *sizeString;
-        if (fileSize.longLongValue < 1024) {
-            sizeString = [NSString stringWithFormat:@"%lld B", fileSize.longLongValue];
-        } else if (fileSize.longLongValue < 1024 * 1024) {
-            sizeString = [NSString stringWithFormat:@"%.1f KB", fileSize.longLongValue / 1024.0];
-        } else {
-            sizeString = [NSString stringWithFormat:@"%.1f MB", fileSize.longLongValue / (1024.0 * 1024.0)];
-        }
+        NSString *sizeString = [self formatFileSize:fileSize.longLongValue];
         
         NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
         [dateFormatter setDateStyle:NSDateFormatterShortStyle];
         [dateFormatter setTimeStyle:NSDateFormatterShortStyle];
         
-        self.fileDetailsLabel.text = [NSString stringWithFormat:@"文件大小: %@\n修改时间: %@",
-                                      sizeString, [dateFormatter stringFromDate:modDate]];
+        self.fileDetailsLabel.text = [NSString stringWithFormat:@"文件大小: %@\n修改时间: %@\n文件路径: %@",
+                                      sizeString, [dateFormatter stringFromDate:modDate], filePath];
+        
+        // 检查文件是否可读
+        if ([[NSFileManager defaultManager] isReadableFileAtPath:filePath]) {
+            [self appendOutput:@"文件权限检查: ✅ 可读"];
+        } else {
+            [self appendOutput:@"文件权限检查: ❌ 不可读"];
+        }
+        
+        // 尝试读取PE头
+        [self validatePEFile:filePath];
+        
     } else {
-        self.fileDetailsLabel.text = @"无法获取文件信息";
+        self.fileDetailsLabel.text = [NSString stringWithFormat:@"无法获取文件信息: %@", error.localizedDescription];
+        [self appendOutput:[NSString stringWithFormat:@"文件分析失败: %@", error.localizedDescription]];
+    }
+}
+
+- (void)validatePEFile:(NSString *)filePath {
+    NSFileHandle *fileHandle = [NSFileHandle fileHandleForReadingAtPath:filePath];
+    if (!fileHandle) {
+        [self appendOutput:@"PE验证: ❌ 无法打开文件"];
+        return;
+    }
+    
+    @try {
+        // 读取DOS头
+        NSData *dosHeader = [fileHandle readDataOfLength:64];
+        if (dosHeader.length >= 2) {
+            const unsigned char *bytes = (const unsigned char *)[dosHeader bytes];
+            if (bytes[0] == 'M' && bytes[1] == 'Z') {
+                [self appendOutput:@"PE验证: ✅ 有效的PE文件 (MZ签名)"];
+                
+                // 读取PE头信息
+                if (dosHeader.length >= 60) {
+                    uint32_t peOffset = *(uint32_t *)(bytes + 60);
+                    [fileHandle seekToFileOffset:peOffset];
+                    NSData *peSignature = [fileHandle readDataOfLength:4];
+                    
+                    if (peSignature.length == 4) {
+                        const unsigned char *peBytes = (const unsigned char *)[peSignature bytes];
+                        if (peBytes[0] == 'P' && peBytes[1] == 'E') {
+                            [self appendOutput:@"PE验证: ✅ PE签名确认"];
+                            
+                            // 读取机器类型
+                            NSData *machineType = [fileHandle readDataOfLength:2];
+                            if (machineType.length == 2) {
+                                uint16_t machine = *(uint16_t *)[machineType bytes];
+                                NSString *architecture = [self getArchitectureString:machine];
+                                [self appendOutput:[NSString stringWithFormat:@"目标架构: %@", architecture]];
+                            }
+                        }
+                    }
+                }
+            } else {
+                [self appendOutput:@"PE验证: ❌ 不是有效的PE文件"];
+            }
+        }
+    } @catch (NSException *exception) {
+        [self appendOutput:[NSString stringWithFormat:@"PE验证异常: %@", exception.reason]];
+    } @finally {
+        [fileHandle closeFile];
+    }
+}
+
+- (NSString *)getArchitectureString:(uint16_t)machine {
+    switch (machine) {
+        case 0x014c:
+            return @"i386 (32位)";
+        case 0x8664:
+            return @"x86_64 (64位)";
+        case 0x01c0:
+            return @"ARM";
+        case 0xaa64:
+            return @"ARM64";
+        default:
+            return [NSString stringWithFormat:@"未知架构 (0x%04x)", machine];
     }
 }
 

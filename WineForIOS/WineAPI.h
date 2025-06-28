@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <pthread.h>  // 添加pthread头文件
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -158,6 +159,9 @@ typedef struct tagPAINTSTRUCT {
 @property (nonatomic, weak) UIViewController *rootViewController;
 
 + (instancetype)sharedAPI;
+
+// 修复：添加线程安全的UI辅助方法
++ (void)showAlertWithTitle:(NSString *)title message:(NSString *)message type:(DWORD)uType;
 
 // KERNEL32 API
 DWORD GetLastError(void);
