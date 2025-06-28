@@ -1,6 +1,9 @@
+// IOSJITEngine.m - 修复iOS API兼容性版本
 #import "IOSJITEngine.h"
 #import <unistd.h>
 #import <dlfcn.h>
+// 🔧 修复：使用iOS可用的API
+#import <libkern/OSCacheControl.h>  // 或者不导入，使用内建函数
 
 // 条件编译：只在真机上使用ptrace
 #if TARGET_OS_IPHONE && !TARGET_IPHONE_SIMULATOR
@@ -9,17 +12,16 @@
 #define PTRACE_AVAILABLE 1
 #else
 #define PTRACE_AVAILABLE 0
-// 模拟器上的ptrace函数声明
 int ptrace(int request, pid_t pid, caddr_t addr, int data) {
     NSLog(@"[IOSJITEngine] ptrace not available on simulator");
-    return 0;  // 模拟成功
+    return 0;
 }
 #define PT_TRACE_ME 0
 #endif
 
 // 页面大小常量
-#define JIT_PAGE_SIZE (16 * 1024)  // iOS上通常是16K页面
-#define MAX_JIT_PAGES 64           // 最大JIT页面数
+#define JIT_PAGE_SIZE (16 * 1024)
+#define MAX_JIT_PAGES 64
 
 @interface IOSJITEngine()
 @property (nonatomic, assign) JITContext *jitContext;
@@ -93,14 +95,12 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
     NSLog(@"[IOSJITEngine] Enabling ptrace debugging...");
     
 #if PTRACE_AVAILABLE
-    // 使用ptrace(PT_TRACE_ME)启用代码签名验证绕过 (仅真机)
     if (ptrace(PT_TRACE_ME, 0, NULL, 0) == -1) {
         NSLog(@"[IOSJITEngine] ptrace(PT_TRACE_ME) failed: %s", strerror(errno));
         return NO;
     }
     NSLog(@"[IOSJITEngine] ptrace debugging enabled successfully (device)");
 #else
-    // 模拟器模式：跳过ptrace，但继续执行
     NSLog(@"[IOSJITEngine] ptrace debugging skipped (simulator mode)");
 #endif
     
@@ -110,7 +110,6 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
 - (BOOL)testWXPermissions {
     NSLog(@"[IOSJITEngine] Testing W^X permissions...");
     
-    // 分配测试内存
     size_t testSize = JIT_PAGE_SIZE;
     void *testMemory = mmap(NULL, testSize, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -137,9 +136,7 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return NO;
     }
     
-    // 清理测试内存
     munmap(testMemory, testSize);
-    
     NSLog(@"[IOSJITEngine] W^X permission test passed!");
     return YES;
 }
@@ -152,10 +149,8 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return NULL;
     }
     
-    // 确保大小是页面对齐的
     size_t alignedSize = (size + JIT_PAGE_SIZE - 1) & ~(JIT_PAGE_SIZE - 1);
     
-    // 分配内存 (初始为可写)
     void *memory = mmap(NULL, alignedSize, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     
@@ -164,7 +159,6 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return NULL;
     }
     
-    // 记录页面信息
     if (_jitContext->pageCount < _jitContext->maxPages) {
         JITPage *page = &_jitContext->pages[_jitContext->pageCount++];
         page->memory = memory;
@@ -180,14 +174,11 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
 - (void)freeJITMemory:(void *)memory {
     if (!memory) return;
     
-    // 查找对应的页面
     for (int i = 0; i < _jitContext->pageCount; i++) {
         JITPage *page = &_jitContext->pages[i];
         if (page->memory == memory) {
-            // 释放内存
             munmap(memory, page->size);
             
-            // 移除页面记录
             for (int j = i; j < _jitContext->pageCount - 1; j++) {
                 _jitContext->pages[j] = _jitContext->pages[j + 1];
             }
@@ -201,10 +192,9 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
     NSLog(@"[IOSJITEngine] Warning: Attempted to free unknown JIT memory %p", memory);
 }
 
-#pragma mark - 权限管理 (W^X实现)
+#pragma mark - 权限管理
 
 - (BOOL)makeMemoryWritable:(void *)memory size:(size_t)size {
-    // 确保大小是页面对齐的
     size_t alignedSize = (size + JIT_PAGE_SIZE - 1) & ~(JIT_PAGE_SIZE - 1);
     
     if (mprotect(memory, alignedSize, PROT_READ | PROT_WRITE) != 0) {
@@ -212,25 +202,48 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return NO;
     }
     
-    // 更新页面状态
     [self updatePagePermissions:memory writable:YES executable:NO];
-    
     return YES;
 }
 
 - (BOOL)makeMemoryExecutable:(void *)memory size:(size_t)size {
-    // 确保大小是页面对齐的
     size_t alignedSize = (size + JIT_PAGE_SIZE - 1) & ~(JIT_PAGE_SIZE - 1);
+    
+    // 🔧 修复：使用iOS兼容的指令缓存清除方法
+    [self clearInstructionCache:memory size:alignedSize];
     
     if (mprotect(memory, alignedSize, PROT_READ | PROT_EXEC) != 0) {
         NSLog(@"[IOSJITEngine] Failed to make memory executable: %s", strerror(errno));
         return NO;
     }
     
-    // 更新页面状态
     [self updatePagePermissions:memory writable:NO executable:YES];
-    
     return YES;
+}
+
+// 🔧 新增：iOS兼容的指令缓存清除方法
+- (void)clearInstructionCache:(void *)memory size:(size_t)size {
+    @try {
+        // 方法1：使用GCC/Clang内建函数（最兼容）
+        __builtin___clear_cache((char *)memory, (char *)memory + size);
+        NSLog(@"[IOSJITEngine] Instruction cache cleared using builtin");
+    } @catch (NSException *exception) {
+        // 方法2：如果内建函数失败，尝试系统调用
+        NSLog(@"[IOSJITEngine] Builtin cache clear failed, trying alternative");
+        
+        @try {
+            // 在iOS上，这个函数可能可用
+            void (*cache_invalidate)(void *, size_t) = dlsym(RTLD_DEFAULT, "sys_icache_invalidate");
+            if (cache_invalidate) {
+                cache_invalidate(memory, size);
+                NSLog(@"[IOSJITEngine] Instruction cache cleared using dlsym");
+            } else {
+                NSLog(@"[IOSJITEngine] sys_icache_invalidate not available, continuing without cache clear");
+            }
+        } @catch (NSException *innerException) {
+            NSLog(@"[IOSJITEngine] All cache clear methods failed, continuing without");
+        }
+    }
 }
 
 - (void)updatePagePermissions:(void *)memory writable:(BOOL)writable executable:(BOOL)executable {
@@ -252,12 +265,12 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return NO;
     }
     
-    // 确保内存是可写的
     if (![self makeMemoryWritable:memory size:size]) {
         return NO;
     }
     
-    // 复制代码到JIT内存
+    // 清零内存后再写入
+    memset(memory, 0, ((size + JIT_PAGE_SIZE - 1) & ~(JIT_PAGE_SIZE - 1)));
     memcpy(memory, code, size);
     
     NSLog(@"[IOSJITEngine] Wrote %zu bytes of code to %p", size, memory);
@@ -270,22 +283,32 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
         return -1;
     }
     
-    // 确保内存是可执行的
     if (![self makeMemoryExecutable:memory size:JIT_PAGE_SIZE]) {
         return -1;
     }
     
     NSLog(@"[IOSJITEngine] Executing JIT code at %p", memory);
     
-    // 将内存转换为函数指针并执行
-    int (*jitFunction)(int, char **) = (int (*)(int, char **))memory;
+    // 验证生成的代码
+    uint32_t *instructions = (uint32_t *)memory;
+    NSLog(@"[IOSJITEngine] First instruction: 0x%08X", instructions[0]);
+    NSLog(@"[IOSJITEngine] Second instruction: 0x%08X", instructions[1]);
     
     @try {
-        int result = jitFunction(argc, argv);
+        typedef int (*JITFunction)(void);
+        JITFunction jitFunction = (JITFunction)memory;
+        
+        NSLog(@"[IOSJITEngine] About to call JIT function at %p", jitFunction);
+        
+        int result = jitFunction();
+        
         NSLog(@"[IOSJITEngine] JIT execution completed with result: %d", result);
         return result;
+        
     } @catch (NSException *exception) {
         NSLog(@"[IOSJITEngine] JIT execution failed: %@", exception.reason);
+        NSLog(@"[IOSJITEngine] Exception name: %@", exception.name);
+        NSLog(@"[IOSJITEngine] Exception userInfo: %@", exception.userInfo);
         return -1;
     }
 }
@@ -297,7 +320,6 @@ int ptrace(int request, pid_t pid, caddr_t addr, int data) {
     
     NSLog(@"[IOSJITEngine] Cleaning up JIT engine...");
     
-    // 释放所有JIT页面
     for (int i = 0; i < _jitContext->pageCount; i++) {
         JITPage *page = &_jitContext->pages[i];
         if (page->memory) {

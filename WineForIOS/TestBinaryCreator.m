@@ -270,6 +270,19 @@
     return peData;
 }
 
+- (NSData *)createSimpleTestInstructions {
+    // 创建最简单的x86指令序列用于测试
+    uint8_t instructions[] = {
+        0xB8, 0x01, 0x00, 0x00, 0x00,  // MOV EAX, 1
+        0x05, 0x01, 0x00, 0x00, 0x00,  // ADD EAX, 1  (结果应该是2)
+        0x90,                           // NOP
+        0x90,                           // NOP
+        0xC3                            // RET
+    };
+    
+    return [NSData dataWithBytes:instructions length:sizeof(instructions)];
+}
+
 #pragma mark - 文件保存
 
 - (NSString *)saveTestPEToDocuments:(NSString *)filename data:(NSData *)peData {
