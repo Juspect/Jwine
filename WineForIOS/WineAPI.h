@@ -160,8 +160,21 @@ typedef struct tagPAINTSTRUCT {
 
 + (instancetype)sharedAPI;
 
+// 🔧 修复：添加初始化方法
+- (BOOL)initializeWineAPI;
+
 // 修复：添加线程安全的UI辅助方法
 + (void)showAlertWithTitle:(NSString *)title message:(NSString *)message type:(DWORD)uType;
+
+// 窗口和设备上下文管理的内部方法
+- (HWND)generateWindowHandle;
+- (HDC)generateDCHandle;
+- (WineWindow *)getWindow:(HWND)hwnd;
+- (WineDC *)getDC:(HDC)hdc;
+- (void)postMessage:(HWND)hwnd message:(DWORD)message wParam:(WPARAM)wParam lParam:(LPARAM)lParam;
+
+// 🔧 新增：注册基础窗口类
+- (void)registerBasicWindowClasses;
 
 // KERNEL32 API
 DWORD GetLastError(void);

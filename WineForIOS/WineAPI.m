@@ -50,6 +50,62 @@
 
 @implementation WineAPI
 
+- (BOOL)initializeWineAPI {
+    NSLog(@"[WineAPI] Initializing Wine API system...");
+    
+    // 重置错误状态
+    _lastError = 0;
+    
+    // 确保集合已初始化
+    if (!_windows) {
+        _windows = [NSMutableDictionary dictionary];
+    }
+    if (!_deviceContexts) {
+        _deviceContexts = [NSMutableDictionary dictionary];
+    }
+    if (!_windowClasses) {
+        _windowClasses = [NSMutableDictionary dictionary];
+    }
+    if (!_messageQueue) {
+        _messageQueue = [NSMutableArray array];
+    }
+    
+    // 重置句柄生成器
+    _nextWindowHandle = 1000;
+    _nextDCHandle = 2000;
+    _quitMessagePosted = NO;
+    
+    // 注册基础窗口类
+    [self registerBasicWindowClasses];
+    
+    NSLog(@"[WineAPI] Wine API initialization completed successfully");
+    return YES;
+}
+
+// 🔧 新增：注册基础窗口类
+- (void)registerBasicWindowClasses {
+    NSLog(@"[WineAPI] Registering basic window classes...");
+    
+    // 注册一些基础的窗口类，避免运行时找不到
+    NSArray *basicClasses = @[@"Button", @"Static", @"Edit", @"ListBox", @"ComboBox", @"#32770"]; // #32770 是对话框类
+    
+    for (NSString *className in basicClasses) {
+        NSDictionary *classInfo = @{
+            @"style": @(0),
+            @"wndProc": [NSValue valueWithPointer:NULL],
+            @"cbClsExtra": @(0),
+            @"cbWndExtra": @(0),
+            @"hInstance": [NSValue valueWithPointer:NULL],
+            @"hIcon": [NSValue valueWithPointer:NULL],
+            @"hCursor": [NSValue valueWithPointer:NULL],
+            @"hbrBackground": [NSValue valueWithPointer:NULL]
+        };
+        
+        _windowClasses[className] = classInfo;
+        NSLog(@"[WineAPI] Registered basic window class: %@", className);
+    }
+}
+
 + (instancetype)sharedAPI {
     static WineAPI *sharedInstance = nil;
     static dispatch_once_t onceToken;

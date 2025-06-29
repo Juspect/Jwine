@@ -1,3 +1,4 @@
+// Box64Engine.h - 完整的头文件声明
 #import <Foundation/Foundation.h>
 #import "IOSJITEngine.h"
 
@@ -9,12 +10,13 @@ NS_ASSUME_NONNULL_BEGIN
 #define MIN_VALID_ADDRESS 0x1000
 #define MAX_MEMORY_SIZE (256 * 1024 * 1024)  // 256MB最大内存
 
-// x86寄存器定义
+// 🔧 修复：x86寄存器定义 - 确保 X86_RIP 正确定义
 typedef NS_ENUM(NSUInteger, X86Register) {
     X86_RAX = 0, X86_RCX, X86_RDX, X86_RBX,
     X86_RSP, X86_RBP, X86_RSI, X86_RDI,
     X86_R8,  X86_R9,  X86_R10, X86_R11,
-    X86_R12, X86_R13, X86_R14, X86_R15, X86_RIP
+    X86_R12, X86_R13, X86_R14, X86_R15,
+    X86_RIP = 16  // 🔧 明确指定 RIP 的值
 };
 
 // ARM64寄存器定义
@@ -110,10 +112,15 @@ typedef struct X86Instruction {
 - (BOOL)unmapMemory:(uint64_t)address size:(size_t)size;
 - (BOOL)protectMemory:(uint64_t)address size:(size_t)size executable:(BOOL)executable writable:(BOOL)writable;
 
-// 指令执行 - 安全版本
+// 🔧 修复：指令执行 - 完整的方法声明
 - (BOOL)executeX86Code:(const uint8_t *)code length:(size_t)length;
 - (BOOL)executeSingleInstruction:(const uint8_t *)instruction;
 - (BOOL)executeWithSafetyCheck:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions;
+- (BOOL)executeWithSafetyCheck:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions baseAddress:(uint64_t)baseAddress;
+
+// 🔧 修复：新增的简化执行方法
+- (BOOL)executeX86CodeSimplified:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions baseAddress:(uint64_t)baseAddress;
+- (BOOL)simulateInstructionExecution:(const X86Instruction *)instruction;
 
 // 寄存器操作 - 安全版本
 - (uint64_t)getX86Register:(X86Register)reg;
@@ -132,8 +139,9 @@ typedef struct X86Instruction {
 - (NSDictionary *)getSystemState;
 - (NSString *)getLastError;
 
-// 安全检查
+// 🔧 修复：安全检查 - 完整的方法声明
 - (BOOL)performSafetyCheck;
+- (BOOL)performSafetyCheckWithRIP:(uint64_t)rip;
 - (void)enableSafeMode:(BOOL)enabled;
 - (NSArray<NSString *> *)getSafetyWarnings;
 

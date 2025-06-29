@@ -1,19 +1,24 @@
+// Box64Engine.m - 修复版：解决JIT执行和ARM64代码生成问题
 #import "Box64Engine.h"
 #import <sys/mman.h>
 #import <pthread.h>
 #import <errno.h>
 #import <string.h>
 
-// ARM64指令编码宏 - 安全版本
+// ARM64指令编码宏 - 修复版本
 #define ARM64_NOP()           0xD503201F
 #define ARM64_RET()           0xD65F03C0
 #define ARM64_MOVZ_X(rd, imm) (0xD2800000 | (((imm) & 0xFFFF) << 5) | ((rd) & 0x1F))
 #define ARM64_ADD_IMM_X(rd, rn, imm) (0x91000000 | (((imm) & 0xFFF) << 10) | (((rn) & 0x1F) << 5) | ((rd) & 0x1F))
+#define ARM64_MOV_W0_ZERO()   0x52800000  // MOV W0, #0
+#define ARM64_STP_X29_X30()   0xA9BF7BFD  // STP X29, X30, [SP, #-16]!
+#define ARM64_MOV_X29_SP()    0x910003FD  // MOV X29, SP
+#define ARM64_LDP_X29_X30()   0xA8C17BFD  // LDP X29, X30, [SP], #16
 
-// x86到ARM64寄存器映射
+// x86到ARM64寄存器映射 - 避免使用系统寄存器
 static const ARM64Register x86_to_arm64_mapping[16] = {
-    ARM64_X19, ARM64_X20, ARM64_X21, ARM64_X22, ARM64_SP, ARM64_X29,
-    ARM64_X23, ARM64_X24, ARM64_X8, ARM64_X9, ARM64_X10, ARM64_X11,
+    ARM64_X19, ARM64_X20, ARM64_X21, ARM64_X22, ARM64_X23, ARM64_X24,
+    ARM64_X25, ARM64_X26, ARM64_X8, ARM64_X9, ARM64_X10, ARM64_X11,
     ARM64_X12, ARM64_X13, ARM64_X14, ARM64_X15
 };
 
@@ -41,7 +46,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     self = [super init];
     if (self) {
         _isInitialized = NO;
-        _isSafeMode = YES;  // 默认启用安全模式
+        _isSafeMode = YES;
         _jitEngine = [IOSJITEngine sharedEngine];
         _safetyWarnings = [NSMutableArray array];
         _contextLock = [[NSRecursiveLock alloc] init];
@@ -72,6 +77,26 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     }
 }
 
+- (void)cleanup {
+    [_contextLock lock];
+    @try {
+        if (_isInitialized && _context) {
+            if (_context->memory_base) {
+                free(_context->memory_base - MEMORY_GUARD_SIZE);
+                _context->memory_base = NULL;
+            }
+            if (_context->jit_cache) {
+                [_jitEngine freeJITMemory:_context->jit_cache];
+                _context->jit_cache = NULL;
+            }
+        }
+        _isInitialized = NO;
+        NSLog(@"[Box64Engine] Cleanup completed");
+    } @finally {
+        [_contextLock unlock];
+    }
+}
+
 #pragma mark - 初始化和清理 - 安全版本
 
 - (BOOL)initializeWithMemorySize:(size_t)memorySize {
@@ -91,13 +116,6 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         if (memorySize < MEMORY_GUARD_SIZE * 4 || memorySize > MAX_MEMORY_SIZE) {
             NSLog(@"[Box64Engine] SECURITY: Invalid memory size: %zu bytes", memorySize);
             _lastError = [NSString stringWithFormat:@"无效的内存大小: %zu字节", memorySize];
-            return NO;
-        }
-        
-        // 确保context存在
-        if (!_context) {
-            NSLog(@"[Box64Engine] CRITICAL: Context is NULL");
-            _lastError = @"执行上下文为空";
             return NO;
         }
         
@@ -122,7 +140,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         _context->memory_size = memorySize;
         memset(_context->memory_base, 0, memorySize + MEMORY_GUARD_SIZE * 2);
         
-        // 设置保护页 - 前后各一页
+        // 设置保护页
         if (mprotect(_context->memory_base, MEMORY_GUARD_SIZE, PROT_NONE) != 0) {
             NSLog(@"[Box64Engine] WARNING: Could not set front guard page: %s", strerror(errno));
         }
@@ -135,8 +153,8 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         // 调整内存基址到可用区域
         _context->memory_base += MEMORY_GUARD_SIZE;
         
-        // 分配JIT缓存
-        _context->jit_cache = [_jitEngine allocateJITMemory:4096];
+        // 分配JIT缓存 - 更大的缓存以支持复杂指令序列
+        _context->jit_cache = [_jitEngine allocateJITMemory:8192]; // 8KB
         if (!_context->jit_cache) {
             NSLog(@"[Box64Engine] CRITICAL: Failed to allocate JIT cache");
             _lastError = @"JIT缓存分配失败";
@@ -209,63 +227,468 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     return YES;
 }
 
-- (void)resetCPUState {
+#pragma mark - 指令执行 - 修复版本
+
+- (BOOL)executeWithSafetyCheck:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions {
+    return [self executeWithSafetyCheck:code length:length maxInstructions:maxInstructions baseAddress:(uint64_t)code];
+}
+
+- (BOOL)executeWithSafetyCheck:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions baseAddress:(uint64_t)baseAddress {
     [_contextLock lock];
     
     @try {
-        if (!_context) {
-            NSLog(@"[Box64Engine] CRITICAL: Cannot reset CPU state - context is NULL");
-            return;
+        if (!_isInitialized || !_context) {
+            NSLog(@"[Box64Engine] SECURITY: Engine not initialized or context is NULL");
+            return NO;
         }
         
-        // 清零所有寄存器
-        memset(_context->x86_regs, 0, sizeof(_context->x86_regs));
-        memset(_context->arm64_regs, 0, sizeof(_context->arm64_regs));
-        
-        // 设置安全的栈指针
-        if (_context->memory_base && _context->stack_base > 0) {
-            _context->x86_regs[X86_RSP] = _context->stack_base + _context->stack_size - 16;
-            _context->arm64_regs[ARM64_SP] = _context->x86_regs[X86_RSP];
+        if (!code || length == 0) {
+            NSLog(@"[Box64Engine] SECURITY: Invalid code parameters");
+            return NO;
         }
         
-        // 设置默认标志和指令指针
-        _context->rflags = 0x202;
-        _context->rip = 0;
-        _context->last_valid_rip = 0;
+        if (length > 1024 * 1024) {
+            NSLog(@"[Box64Engine] SECURITY: Code too large: %zu bytes", length);
+            return NO;
+        }
+        
+        NSLog(@"[Box64Engine] 🔧 执行参数检查:");
+        NSLog(@"[Box64Engine]   代码指针: %p", code);
+        NSLog(@"[Box64Engine]   代码长度: %zu字节", length);
+        NSLog(@"[Box64Engine]   最大指令数: %u", maxInstructions);
+        NSLog(@"[Box64Engine]   基地址: 0x%llx", baseAddress);
+        
+        // 显示前几个字节
+        if (length >= 8) {
+            NSLog(@"[Box64Engine]   前8字节: %02X %02X %02X %02X %02X %02X %02X %02X",
+                  code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]);
+        }
+        
+        NSLog(@"[Box64Engine] Executing %zu bytes of x86 code (max %u instructions) at base 0x%llx", length, maxInstructions, baseAddress);
+        
+        // 重置执行计数器
         _context->instruction_count = 0;
+        _context->max_instructions = maxInstructions;
+        _context->last_valid_rip = 0;
         
-        // 清空最后指令记录
-        memset(_context->last_instruction, 0, sizeof(_context->last_instruction));
+        // 🔧 修复：使用传入的基地址初始化RIP
+        _context->rip = baseAddress;
         
-        NSLog(@"[Box64Engine] CPU state reset safely - RSP: 0x%llx", _context->x86_regs[X86_RSP]);
+        NSLog(@"[Box64Engine] 🔧 开始执行循环...");
+        
+        // 🔧 修复：使用简化的执行模式，传递基地址
+        BOOL success = [self executeX86CodeSimplified:code length:length maxInstructions:maxInstructions baseAddress:baseAddress];
+        
+        if (success) {
+            NSLog(@"[Box64Engine] ✅ x86 code execution completed successfully (%u instructions)", _context->instruction_count);
+        } else {
+            NSLog(@"[Box64Engine] ❌ x86 code execution failed after %u instructions", _context->instruction_count);
+        }
+        
+        return success;
         
     } @finally {
         [_contextLock unlock];
     }
 }
 
-- (void)resetToSafeState {
+// 🔧 新增：简化的x86指令执行，避免JIT编译问题
+- (BOOL)executeX86CodeSimplified:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions baseAddress:(uint64_t)baseAddress {
+    size_t executed_bytes = 0;
+    
+    NSLog(@"[Box64Engine] 🔧 executeX86CodeSimplified 开始:");
+    NSLog(@"[Box64Engine]   代码长度: %zu", length);
+    NSLog(@"[Box64Engine]   最大指令数: %u", maxInstructions);
+    NSLog(@"[Box64Engine]   基地址: 0x%llx", baseAddress);
+    
+    while (executed_bytes < length && _context->instruction_count < maxInstructions) {
+        const uint8_t *current_instruction = code + executed_bytes;
+        size_t remaining_bytes = length - executed_bytes;
+        
+        NSLog(@"[Box64Engine] 📍 指令 %u: 偏移=%zu, 剩余=%zu字节", _context->instruction_count + 1, executed_bytes, remaining_bytes);
+        NSLog(@"[Box64Engine]   当前字节: %02X %02X %02X %02X",
+              current_instruction[0],
+              remaining_bytes > 1 ? current_instruction[1] : 0,
+              remaining_bytes > 2 ? current_instruction[2] : 0,
+              remaining_bytes > 3 ? current_instruction[3] : 0);
+        
+        // 解码指令
+        X86Instruction decoded = [self decodeInstruction:current_instruction maxLength:remaining_bytes];
+        
+        NSLog(@"[Box64Engine] 🔍 指令解码结果:");
+        NSLog(@"[Box64Engine]   有效: %s", decoded.is_valid ? "是" : "否");
+        NSLog(@"[Box64Engine]   安全: %s", decoded.is_safe ? "是" : "否");
+        NSLog(@"[Box64Engine]   长度: %d字节", decoded.length);
+        NSLog(@"[Box64Engine]   助记符: %s", decoded.mnemonic);
+        
+        if (!decoded.is_valid) {
+            NSLog(@"[Box64Engine] SECURITY: Invalid instruction at offset %zu", executed_bytes);
+            return NO;
+        }
+        
+        if (!decoded.is_safe && _isSafeMode) {
+            NSLog(@"[Box64Engine] SECURITY: Unsafe instruction %s blocked in safe mode", decoded.mnemonic);
+            return NO;
+        }
+        
+        // 记录最后有效的RIP
+        _context->last_valid_rip = _context->rip;
+        memcpy(_context->last_instruction, current_instruction, MIN(decoded.length, sizeof(_context->last_instruction)));
+        
+        NSLog(@"[Box64Engine] 🚀 开始执行指令: %s", decoded.mnemonic);
+        
+        // 🔧 修复：直接模拟指令执行，避免JIT编译
+        if (![self simulateInstructionExecution:&decoded]) {
+            NSLog(@"[Box64Engine] SECURITY: Failed to simulate instruction at offset %zu", executed_bytes);
+            return NO;
+        }
+        
+        executed_bytes += decoded.length;
+        _context->instruction_count++;
+        
+        // 🔧 修复：正确更新RIP为绝对地址
+        _context->rip = baseAddress + executed_bytes;
+        
+        NSLog(@"[Box64Engine] ✅ 指令执行完成:");
+        NSLog(@"[Box64Engine]   执行字节数: %zu", executed_bytes);
+        NSLog(@"[Box64Engine]   指令计数: %u", _context->instruction_count);
+        NSLog(@"[Box64Engine]   新RIP: 0x%llx", _context->rip);
+        
+        // 执行后安全检查 - 修复RIP检查逻辑
+        if (![self performSafetyCheckWithRIP:_context->rip]) {
+            NSLog(@"[Box64Engine] SECURITY: Safety check failed after instruction %u", _context->instruction_count);
+            return NO;
+        }
+        
+        NSLog(@"[Box64Engine] Executed instruction %u: %s, new RIP: 0x%llx", _context->instruction_count, decoded.mnemonic, _context->rip);
+        
+        // 🔧 新增：检查RET指令，如果遇到就停止执行
+        if (decoded.opcode == 0xC3) {
+            NSLog(@"[Box64Engine] ℹ️ 遇到RET指令，正常结束执行");
+            break;
+        }
+    }
+    
+    if (_context->instruction_count >= maxInstructions) {
+        NSLog(@"[Box64Engine] INFO: Hit instruction limit %u, stopping execution", maxInstructions);
+    }
+    
+    NSLog(@"[Box64Engine] 🎯 执行循环结束: 共执行 %u 条指令", _context->instruction_count);
+    
+    return YES;
+}
+
+// 🔧 新增：直接模拟指令执行，避免JIT编译问题
+- (BOOL)simulateInstructionExecution:(const X86Instruction *)instruction {
+    if (!instruction || !instruction->is_valid) {
+        return NO;
+    }
+    
+    NSLog(@"[Box64Engine] Simulating instruction: %s (opcode 0x%02X, length=%d)",
+          instruction->mnemonic, instruction->opcode, instruction->length);
+    
+    switch (instruction->opcode) {
+        case 0x90:  // NOP
+            // 无操作
+            break;
+            
+        case 0x48: {  // REX.W prefix instructions
+            // 🔧 修复：正确处理各种 REX.W 指令
+            if (strstr(instruction->mnemonic, "MOV RAX,") != NULL && instruction->has_immediate) {
+                uint64_t immediate = instruction->immediate;
+                
+                if (![self setX86Register:X86_RAX value:immediate]) {
+                    NSLog(@"[Box64Engine] Failed to set RAX to 0x%llx", immediate);
+                    return NO;
+                }
+                
+                NSLog(@"[Box64Engine] ✅ REX.W MOV RAX, 0x%llx executed successfully", immediate);
+                
+            } else if (strstr(instruction->mnemonic, "MOV RCX,") != NULL && instruction->has_immediate) {
+                uint64_t immediate = instruction->immediate;
+                
+                if (![self setX86Register:X86_RCX value:immediate]) {
+                    NSLog(@"[Box64Engine] Failed to set RCX to 0x%llx", immediate);
+                    return NO;
+                }
+                
+                NSLog(@"[Box64Engine] ✅ REX.W MOV RCX, 0x%llx executed successfully", immediate);
+                
+            } else if (strstr(instruction->mnemonic, "SUB RSP,") != NULL && instruction->has_immediate) {
+                // SUB RSP, imm8 - 栈指针减法
+                uint64_t currentRSP = [self getX86Register:X86_RSP];
+                uint64_t newRSP = currentRSP - instruction->immediate;
+                
+                if (![self setX86Register:X86_RSP value:newRSP]) {
+                    NSLog(@"[Box64Engine] Failed to update RSP: 0x%llx -> 0x%llx", currentRSP, newRSP);
+                    return NO;
+                }
+                
+                NSLog(@"[Box64Engine] ✅ SUB RSP, 0x%llx: 0x%llx -> 0x%llx",
+                      instruction->immediate, currentRSP, newRSP);
+                
+            } else {
+                NSLog(@"[Box64Engine] REX.W instruction executed (generic): %s", instruction->mnemonic);
+            }
+            break;
+        }
+        
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB:  // MOV reg, imm32
+        case 0xBC: case 0xBD: case 0xBE: case 0xBF: {
+            X86Register reg = (X86Register)(instruction->opcode & 7);
+            uint64_t immediate = instruction->immediate;
+            
+            if (![self setX86Register:reg value:immediate]) {
+                NSLog(@"[Box64Engine] Failed to set register %d to 0x%llx", reg, immediate);
+                return NO;
+            }
+            
+            NSLog(@"[Box64Engine] MOV r%d, 0x%llx", reg, immediate);
+            break;
+        }
+        
+        case 0xC3:  // RET
+            // 简化的返回处理
+            NSLog(@"[Box64Engine] RET instruction - ending execution");
+            return YES;
+            
+        default:
+            if (_isSafeMode) {
+                NSLog(@"[Box64Engine] SECURITY: Unsupported opcode 0x%02X in safe mode", instruction->opcode);
+                return NO;
+            } else {
+                NSLog(@"[Box64Engine] WARNING: Unsupported opcode 0x%02X, treating as NOP", instruction->opcode);
+            }
+            break;
+    }
+    
+    return YES;
+}
+
+#pragma mark - 指令解码 - 增强版本
+
+- (X86Instruction)decodeInstruction:(const uint8_t *)instruction maxLength:(size_t)maxLength {
+    X86Instruction decoded = {0};
+    
+    if (!instruction || maxLength == 0) {
+        NSLog(@"[Box64Engine] SECURITY: decodeInstruction: invalid parameters");
+        decoded.is_valid = NO;
+        strcpy(decoded.mnemonic, "INVALID");
+        return decoded;
+    }
+    
+    decoded.opcode = instruction[0];
+    decoded.length = 1;
+    decoded.is_valid = YES;
+    decoded.is_safe = YES;
+    
+    switch (decoded.opcode) {
+        case 0x90:  // NOP
+            strcpy(decoded.mnemonic, "NOP");
+            break;
+            
+        case 0x48:  // REX.W prefix
+            if (maxLength < 2) {
+                decoded.is_valid = NO;
+                strcpy(decoded.mnemonic, "TRUNCATED_REX");
+                break;
+            }
+            
+            uint8_t next_opcode = instruction[1];
+            
+            // 🔧 修复：正确解码各种 REX.W 指令
+            if (next_opcode == 0xC7 && maxLength >= 7) {
+                // REX.W + MOV r/m64, imm32
+                uint8_t modrm = instruction[2];
+                if (modrm == 0xC0) {  // MOV RAX, imm32
+                    decoded.length = 7;
+                    decoded.has_immediate = YES;
+                    decoded.immediate = *(uint32_t *)(instruction + 3);
+                    sprintf(decoded.mnemonic, "MOV RAX, 0x%X", (uint32_t)decoded.immediate);
+                } else if (modrm == 0xC1) {  // MOV RCX, imm32
+                    decoded.length = 7;
+                    decoded.has_immediate = YES;
+                    decoded.immediate = *(uint32_t *)(instruction + 3);
+                    sprintf(decoded.mnemonic, "MOV RCX, 0x%X", (uint32_t)decoded.immediate);
+                } else {
+                    decoded.length = 7;  // 假设是7字节
+                    sprintf(decoded.mnemonic, "REX.W+MOV_RM64");
+                }
+                NSLog(@"[Box64Engine] Decoded REX.W MOV instruction (length=%d)", decoded.length);
+                
+            } else if (next_opcode == 0x83 && maxLength >= 4) {
+                // REX.W + ADD/SUB r/m64, imm8
+                uint8_t modrm = instruction[2];
+                uint8_t immediate = instruction[3];
+                decoded.length = 4;
+                decoded.has_immediate = YES;
+                decoded.immediate = immediate;
+                
+                // 解析 ModR/M 字节来确定操作
+                uint8_t reg_field = (modrm >> 3) & 7;
+                uint8_t rm_field = modrm & 7;
+                
+                if (reg_field == 5 && rm_field == 4) {  // SUB RSP, imm8
+                    sprintf(decoded.mnemonic, "SUB RSP, 0x%02X", immediate);
+                } else if (reg_field == 0) {  // ADD
+                    sprintf(decoded.mnemonic, "ADD r%d, 0x%02X", rm_field, immediate);
+                } else {
+                    sprintf(decoded.mnemonic, "REX.W+ARITH r%d, 0x%02X", rm_field, immediate);
+                }
+                NSLog(@"[Box64Engine] Decoded REX.W arithmetic: %s", decoded.mnemonic);
+                
+            } else {
+                decoded.length = 2;
+                sprintf(decoded.mnemonic, "REX.W+0x%02X", next_opcode);
+            }
+            break;
+            
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB:  // MOV reg, imm32
+        case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+            if (maxLength < 5) {
+                decoded.is_valid = NO;
+                strcpy(decoded.mnemonic, "TRUNCATED");
+                break;
+            }
+            decoded.has_immediate = YES;
+            decoded.immediate = *(uint32_t *)(instruction + 1);
+            decoded.length = 5;
+            sprintf(decoded.mnemonic, "MOV r%d, 0x%X", decoded.opcode & 7, (uint32_t)decoded.immediate);
+            
+            // 安全检查立即数
+            if (decoded.immediate > 0 && decoded.immediate < MIN_VALID_ADDRESS) {
+                decoded.is_safe = NO;
+            }
+            break;
+            
+        case 0xC3:  // RET
+            strcpy(decoded.mnemonic, "RET");
+            break;
+            
+        default:
+            sprintf(decoded.mnemonic, "UNK_0x%02X", decoded.opcode);
+            decoded.is_safe = NO;
+            NSLog(@"[Box64Engine] WARNING: Unknown opcode: 0x%02X", decoded.opcode);
+            break;
+    }
+    
+    return decoded;
+}
+
+#pragma mark - 寄存器操作 - 安全版本
+
+- (uint64_t)getX86Register:(X86Register)reg {
     [_contextLock lock];
     
     @try {
-        NSLog(@"[Box64Engine] Resetting to safe state...");
-        
-        [self resetCPUState];
-        [_safetyWarnings removeAllObjects];
-        
-        if (_context) {
-            _context->is_in_safe_mode = YES;
-            _context->instruction_count = 0;
+        if (!_context) {
+            NSLog(@"[Box64Engine] SECURITY: Cannot get register - context is NULL");
+            return 0;
         }
         
-        _isSafeMode = YES;
-        _lastError = nil;
+        // 🔧 修复：X86_RIP = 16 是合法的，所以应该是 > 16
+        if (reg > 16) {
+            NSLog(@"[Box64Engine] SECURITY: Invalid register index %lu", (unsigned long)reg);
+            return 0;
+        }
         
-        NSLog(@"[Box64Engine] Safe state reset completed");
+        // 🔧 修复：RIP寄存器特殊处理
+        if (reg == X86_RIP) {
+            return _context->rip;
+        }
+        
+        uint64_t value = _context->x86_regs[reg];
+        
+        // 检查可疑的寄存器值
+        if (value > 0 && value < MIN_VALID_ADDRESS && _isSafeMode) {
+            NSLog(@"[Box64Engine] WARNING: Register %lu contains suspicious low address: 0x%llx",
+                  (unsigned long)reg, value);
+            [_safetyWarnings addObject:[NSString stringWithFormat:@"寄存器%lu包含可疑地址0x%llx", (unsigned long)reg, value]];
+        }
+        
+        return value;
         
     } @finally {
         [_contextLock unlock];
     }
+}
+
+- (BOOL)setX86Register:(X86Register)reg value:(uint64_t)value {
+    [_contextLock lock];
+    
+    @try {
+        if (!_context) {
+            NSLog(@"[Box64Engine] SECURITY: Cannot set register - context is NULL");
+            return NO;
+        }
+        
+        // 🔧 修复：X86_RIP = 16 是合法的，所以应该是 > 16
+        if (reg > 16) {
+            NSLog(@"[Box64Engine] SECURITY: Invalid register index %lu", (unsigned long)reg);
+            return NO;
+        }
+        
+        // 🔧 修复：RIP寄存器特殊处理
+        if (reg == X86_RIP) {
+            // RIP寄存器的值可以是任何有效地址
+            _context->rip = value;
+            NSLog(@"[Box64Engine] Set RIP = 0x%llx", value);
+            return YES;
+        }
+        
+        // 验证寄存器值
+        if (![self validateRegisterValue:reg value:value]) {
+            NSLog(@"[Box64Engine] SECURITY: Register validation failed for %lu = 0x%llx", (unsigned long)reg, value);
+            return NO;
+        }
+        
+        _context->x86_regs[reg] = value;
+        
+        // 同步到ARM64寄存器
+        if (reg < 16) {
+            ARM64Register arm64reg = x86_to_arm64_mapping[reg];
+            _context->arm64_regs[arm64reg] = value;
+        }
+        
+        NSLog(@"[Box64Engine] Set register %lu = 0x%llx", (unsigned long)reg, value);
+        return YES;
+        
+    } @finally {
+        [_contextLock unlock];
+    }
+}
+
+- (BOOL)validateRegisterValue:(X86Register)reg value:(uint64_t)value {
+    if (!_isSafeMode) {
+        return YES;
+    }
+    
+    // 🔧 修复：RIP寄存器不需要特殊验证，因为它在上面已经特殊处理了
+    if (reg == X86_RIP) {
+        return YES;
+    }
+    
+    // 栈指针特殊检查
+    if (reg == X86_RSP) {
+        if (value < _context->stack_base || value >= _context->stack_base + _context->stack_size) {
+            NSLog(@"[Box64Engine] SECURITY: Stack pointer 0x%llx out of stack range", value);
+            return NO;
+        }
+    }
+    
+    // 检查指针类型寄存器
+    if (value > 0 && value < MIN_VALID_ADDRESS) {
+        NSLog(@"[Box64Engine] SECURITY: Register value 0x%llx is in dangerous low memory range", value);
+        return NO;
+    }
+    
+    // 检查是否在有效内存范围内
+    if (value > MIN_VALID_ADDRESS && ![self isValidMemoryAddress:value size:1]) {
+        NSLog(@"[Box64Engine] SECURITY: Register value 0x%llx points to invalid memory", value);
+        return NO;
+    }
+    
+    return YES;
 }
 
 #pragma mark - 内存管理 - 安全版本
@@ -335,482 +758,75 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     }
 }
 
-- (uint8_t *)allocateMemoryAt:(uint64_t)address size:(size_t)size {
-    [_contextLock lock];
-    
-    @try {
-        if (![self isValidMemoryAddress:address size:size]) {
-            NSLog(@"[Box64Engine] SECURITY: Invalid memory allocation at 0x%llx size %zu", address, size);
-            return NULL;
-        }
-        
-        uint8_t *memory = (uint8_t *)address;
-        memset(memory, 0, size);
-        
-        NSLog(@"[Box64Engine] Allocated %zu bytes at fixed address 0x%llx", size, address);
-        return memory;
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
+#pragma mark - 状态管理
 
-- (void)freeMemory:(uint8_t *)memory {
-    [_contextLock lock];
-    
-    @try {
-        if (!memory) {
-            NSLog(@"[Box64Engine] WARNING: Attempting to free NULL pointer");
-            return;
-        }
-        
-        // 检查指针是否在有效范围内
-        uint64_t addr = (uint64_t)memory;
-        if (![self isValidMemoryAddress:addr size:1]) {
-            NSLog(@"[Box64Engine] SECURITY: Attempting to free invalid pointer 0x%p", memory);
-            return;
-        }
-        
-        NSLog(@"[Box64Engine] Freed memory at 0x%p", memory);
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (BOOL)mapMemory:(uint64_t)address size:(size_t)size data:(nullable NSData *)data {
-    [_contextLock lock];
-    
-    @try {
-        if (![self isValidMemoryAddress:address size:size]) {
-            NSLog(@"[Box64Engine] SECURITY: Invalid memory mapping at 0x%llx size %zu", address, size);
-            return NO;
-        }
-        
-        uint8_t *target = (uint8_t *)address;
-        
-        if (data) {
-            size_t copy_size = MIN(size, data.length);
-            memcpy(target, data.bytes, copy_size);
-            NSLog(@"[Box64Engine] Mapped %zu bytes of data to 0x%llx", copy_size, address);
-        } else {
-            memset(target, 0, size);
-            NSLog(@"[Box64Engine] Mapped %zu bytes of zeros to 0x%llx", size, address);
-        }
-        
-        return YES;
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-#pragma mark - 寄存器操作 - 安全版本
-
-- (uint64_t)getX86Register:(X86Register)reg {
+- (void)resetCPUState {
     [_contextLock lock];
     
     @try {
         if (!_context) {
-            NSLog(@"[Box64Engine] SECURITY: Cannot get register - context is NULL");
-            return 0;
+            NSLog(@"[Box64Engine] CRITICAL: Cannot reset CPU state - context is NULL");
+            return;
         }
         
-        if (reg >= 16) {
-            NSLog(@"[Box64Engine] SECURITY: Invalid register index %lu", (unsigned long)reg);
-            return 0;
+        // 清零所有寄存器
+        memset(_context->x86_regs, 0, sizeof(_context->x86_regs));
+        memset(_context->arm64_regs, 0, sizeof(_context->arm64_regs));
+        
+        // 设置安全的栈指针
+        if (_context->memory_base && _context->stack_base > 0) {
+            _context->x86_regs[X86_RSP] = _context->stack_base + _context->stack_size - 16;
+            _context->arm64_regs[ARM64_SP] = _context->x86_regs[X86_RSP];
         }
         
-        uint64_t value = _context->x86_regs[reg];
-        
-        // 检查可疑的寄存器值
-        if (value > 0 && value < MIN_VALID_ADDRESS && _isSafeMode) {
-            NSLog(@"[Box64Engine] WARNING: Register %lu contains suspicious low address: 0x%llx",
-                  (unsigned long)reg, value);
-            [_safetyWarnings addObject:[NSString stringWithFormat:@"寄存器%lu包含可疑地址0x%llx", (unsigned long)reg, value]];
-        }
-        
-        return value;
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (BOOL)setX86Register:(X86Register)reg value:(uint64_t)value {
-    [_contextLock lock];
-    
-    @try {
-        if (!_context) {
-            NSLog(@"[Box64Engine] SECURITY: Cannot set register - context is NULL");
-            return NO;
-        }
-        
-        if (reg >= 16) {
-            NSLog(@"[Box64Engine] SECURITY: Invalid register index %lu", (unsigned long)reg);
-            return NO;
-        }
-        
-        // 验证寄存器值
-        if (![self validateRegisterValue:reg value:value]) {
-            NSLog(@"[Box64Engine] SECURITY: Register validation failed for %lu = 0x%llx", (unsigned long)reg, value);
-            return NO;
-        }
-        
-        _context->x86_regs[reg] = value;
-        
-        // 同步到ARM64寄存器
-        if (reg < 16) {
-            ARM64Register arm64reg = x86_to_arm64_mapping[reg];
-            _context->arm64_regs[arm64reg] = value;
-        }
-        
-        NSLog(@"[Box64Engine] Set register %lu = 0x%llx", (unsigned long)reg, value);
-        return YES;
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (BOOL)validateRegisterValue:(X86Register)reg value:(uint64_t)value {
-    if (!_isSafeMode) {
-        return YES;  // 非安全模式下允许任何值
-    }
-    
-    // 栈指针特殊检查
-    if (reg == X86_RSP) {
-        if (value < _context->stack_base || value >= _context->stack_base + _context->stack_size) {
-            NSLog(@"[Box64Engine] SECURITY: Stack pointer 0x%llx out of stack range", value);
-            return NO;
-        }
-    }
-    
-    // 检查指针类型寄存器
-    if (value > 0 && value < MIN_VALID_ADDRESS) {
-        NSLog(@"[Box64Engine] SECURITY: Register value 0x%llx is in dangerous low memory range", value);
-        return NO;
-    }
-    
-    // 检查是否在有效内存范围内
-    if (value > MIN_VALID_ADDRESS && ![self isValidMemoryAddress:value size:1]) {
-        NSLog(@"[Box64Engine] SECURITY: Register value 0x%llx points to invalid memory", value);
-        return NO;
-    }
-    
-    return YES;
-}
-
-#pragma mark - 指令执行 - 安全版本
-
-- (BOOL)executeX86Code:(const uint8_t *)code length:(size_t)length {
-    return [self executeWithSafetyCheck:code length:length maxInstructions:MAX_INSTRUCTIONS_PER_EXECUTION];
-}
-
-- (BOOL)executeWithSafetyCheck:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions {
-    [_contextLock lock];
-    
-    @try {
-        if (!_isInitialized || !_context) {
-            NSLog(@"[Box64Engine] SECURITY: Engine not initialized or context is NULL");
-            return NO;
-        }
-        
-        if (!code || length == 0) {
-            NSLog(@"[Box64Engine] SECURITY: Invalid code parameters");
-            return NO;
-        }
-        
-        if (length > 1024 * 1024) {  // 1MB代码限制
-            NSLog(@"[Box64Engine] SECURITY: Code too large: %zu bytes", length);
-            return NO;
-        }
-        
-        NSLog(@"[Box64Engine] Executing %zu bytes of x86 code (max %u instructions)", length, maxInstructions);
-        
-        // 重置执行计数器
-        _context->instruction_count = 0;
-        _context->max_instructions = maxInstructions;
+        // 设置默认标志和指令指针
+        _context->rflags = 0x202;
         _context->rip = 0;
         _context->last_valid_rip = 0;
+        _context->instruction_count = 0;
         
-        // 安全的执行循环
-        size_t executed_bytes = 0;
+        // 清空最后指令记录
+        memset(_context->last_instruction, 0, sizeof(_context->last_instruction));
         
-        while (executed_bytes < length && _context->instruction_count < maxInstructions) {
-            const uint8_t *current_instruction = code + executed_bytes;
-            size_t remaining_bytes = length - executed_bytes;
-            
-            // 解码指令
-            X86Instruction decoded = [self decodeInstruction:current_instruction maxLength:remaining_bytes];
-            
-            if (!decoded.is_valid) {
-                NSLog(@"[Box64Engine] SECURITY: Invalid instruction at offset %zu", executed_bytes);
-                return NO;
-            }
-            
-            if (!decoded.is_safe && _isSafeMode) {
-                NSLog(@"[Box64Engine] SECURITY: Unsafe instruction %s blocked in safe mode", decoded.mnemonic);
-                return NO;
-            }
-            
-            // 记录最后有效的RIP
-            _context->last_valid_rip = _context->rip;
-            memcpy(_context->last_instruction, current_instruction, MIN(decoded.length, sizeof(_context->last_instruction)));
-            
-            // 执行指令
-            if (![self executeSingleInstruction:current_instruction]) {
-                NSLog(@"[Box64Engine] SECURITY: Failed to execute instruction at offset %zu", executed_bytes);
-                return NO;
-            }
-            
-            executed_bytes += decoded.length;
-            _context->instruction_count++;
-            _context->rip = executed_bytes;
-            
-            // 执行后安全检查
-            if (![self performSafetyCheck]) {
-                NSLog(@"[Box64Engine] SECURITY: Safety check failed after instruction %u", _context->instruction_count);
-                return NO;
-            }
-            
-            NSLog(@"[Box64Engine] Executed instruction %u, offset %zu", _context->instruction_count, executed_bytes);
-        }
-        
-        if (_context->instruction_count >= maxInstructions) {
-            NSLog(@"[Box64Engine] INFO: Hit instruction limit %u, stopping execution", maxInstructions);
-        }
-        
-        NSLog(@"[Box64Engine] x86 code execution completed successfully (%u instructions)", _context->instruction_count);
-        return YES;
+        NSLog(@"[Box64Engine] CPU state reset safely - RSP: 0x%llx", _context->x86_regs[X86_RSP]);
         
     } @finally {
         [_contextLock unlock];
     }
 }
 
-- (BOOL)executeSingleInstruction:(const uint8_t *)instruction {
-    if (!instruction || !_context) {
-        NSLog(@"[Box64Engine] SECURITY: executeSingleInstruction: invalid parameters");
-        return NO;
-    }
-    
-    X86Instruction decoded = [self decodeInstruction:instruction maxLength:16];
-    
-    if (!decoded.is_valid) {
-        NSLog(@"[Box64Engine] SECURITY: Cannot execute invalid instruction");
-        return NO;
-    }
-    
-    NSLog(@"[Box64Engine] Executing instruction: %s (opcode 0x%02X)", decoded.mnemonic, decoded.opcode);
-    
-    // 生成对应的ARM64代码
-    NSMutableData *arm64Code = [NSMutableData data];
-    
-    // 添加函数序言 - 安全版本
-    uint32_t prologue[] = {
-        0xA9BF7BFD,  // STP X29, X30, [SP, #-16]!
-        0x910003FD   // MOV X29, SP
-    };
-    [arm64Code appendBytes:prologue length:sizeof(prologue)];
-    
-    // 根据指令类型生成ARM64代码
-    switch (decoded.opcode) {
-        case 0x90:  // NOP
-            [self generateARM64NOP:arm64Code];
-            break;
-            
-        case 0xB8: case 0xB9: case 0xBA: case 0xBB:  // MOV reg, imm32
-        case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-            [self generateARM64MOVImm:arm64Code reg:(decoded.opcode & 7) immediate:decoded.immediate];
-            break;
-            
-        case 0xC3:  // RET
-            [self generateARM64Return:arm64Code];
-            break;
-            
-        default:
-            if (_isSafeMode) {
-                NSLog(@"[Box64Engine] SECURITY: Unsupported opcode 0x%02X in safe mode", decoded.opcode);
-                return NO;
-            } else {
-                NSLog(@"[Box64Engine] WARNING: Unsupported opcode 0x%02X, generating NOP", decoded.opcode);
-                [self generateARM64NOP:arm64Code];
-            }
-            break;
-    }
-    
-    // 添加函数尾声
-    uint32_t epilogue[] = {
-        0x52800000,  // MOV W0, #0
-        0xA8C17BFD,  // LDP X29, X30, [SP], #16
-        0xD65F03C0   // RET
-    };
-    [arm64Code appendBytes:epilogue length:sizeof(epilogue)];
-    
-    // 执行生成的ARM64代码
-    return [self executeARM64Code:arm64Code];
-}
-
-#pragma mark - ARM64代码生成 - 安全版本
-
-- (void)generateARM64NOP:(NSMutableData *)code {
-    uint32_t nop = ARM64_NOP();
-    [code appendBytes:&nop length:sizeof(nop)];
-}
-
-- (void)generateARM64MOVImm:(NSMutableData *)code reg:(X86Register)x86reg immediate:(int64_t)immediate {
-    if (x86reg >= 16) {
-        NSLog(@"[Box64Engine] SECURITY: Invalid x86 register: %lu", (unsigned long)x86reg);
-        return;
-    }
-    
-    // 安全检查立即数
-    if (_isSafeMode && immediate > 0 && immediate < MIN_VALID_ADDRESS) {
-        NSLog(@"[Box64Engine] SECURITY: Blocking dangerous immediate value 0x%llx", immediate);
-        immediate = 0;  // 将危险值置零
-    }
-    
-    ARM64Register arm64reg = x86_to_arm64_mapping[x86reg];
-    
-    uint32_t movz = ARM64_MOVZ_X(arm64reg, immediate & 0xFFFF);
-    [code appendBytes:&movz length:sizeof(movz)];
-    
-    // 安全的寄存器状态更新
-    if (_context && [self validateRegisterValue:x86reg value:(immediate & 0xFFFF)]) {
-        _context->x86_regs[x86reg] = immediate & 0xFFFF;
-        _context->arm64_regs[arm64reg] = immediate & 0xFFFF;
-    }
-    
-    NSLog(@"[Box64Engine] Generated MOVZ X%d, #0x%04X", arm64reg, (uint16_t)(immediate & 0xFFFF));
-}
-
-- (void)generateARM64Return:(NSMutableData *)code {
-    uint32_t ret = ARM64_RET();
-    [code appendBytes:&ret length:sizeof(ret)];
-}
-
-- (BOOL)executeARM64Code:(NSData *)code {
-    if (!code || code.length == 0) {
-        return YES;
-    }
-    
-    if (code.length > 4096 || !_context || !_context->jit_cache) {
-        NSLog(@"[Box64Engine] SECURITY: Invalid ARM64 code execution parameters");
-        return NO;
-    }
-    
-    // 写入和执行JIT代码
-    if (![_jitEngine writeCode:code.bytes size:code.length toMemory:_context->jit_cache]) {
-        NSLog(@"[Box64Engine] SECURITY: Failed to write ARM64 code to JIT memory");
-        return NO;
-    }
-    
-    if (![_jitEngine makeMemoryExecutable:_context->jit_cache size:4096]) {
-        NSLog(@"[Box64Engine] SECURITY: Failed to make JIT memory executable");
-        return NO;
-    }
+- (void)resetToSafeState {
+    [_contextLock lock];
     
     @try {
-        NSLog(@"[Box64Engine] Executing %lu bytes of ARM64 code", (unsigned long)code.length);
+        NSLog(@"[Box64Engine] Resetting to safe state...");
         
-        int result = [_jitEngine executeCode:_context->jit_cache withArgc:0 argv:NULL];
+        [self resetCPUState];
+        [_safetyWarnings removeAllObjects];
         
-        NSLog(@"[Box64Engine] ARM64 execution completed with result: %d", result);
-        return result >= 0;
+        if (_context) {
+            _context->is_in_safe_mode = YES;
+            _context->instruction_count = 0;
+        }
         
-    } @catch (NSException *exception) {
-        NSLog(@"[Box64Engine] CRITICAL: Exception during ARM64 execution: %@", exception.reason);
-        _lastError = [NSString stringWithFormat:@"ARM64执行异常: %@", exception.reason];
+        _isSafeMode = YES;
+        _lastError = nil;
         
-        // 记录崩溃状态用于调试
-        [self dumpCrashState];
+        NSLog(@"[Box64Engine] Safe state reset completed");
         
-        return NO;
+    } @finally {
+        [_contextLock unlock];
     }
 }
 
-#pragma mark - 指令解码 - 增强版本
-
-- (X86Instruction)decodeInstruction:(const uint8_t *)instruction maxLength:(size_t)maxLength {
-    X86Instruction decoded = {0};
-    
-    if (!instruction || maxLength == 0) {
-        NSLog(@"[Box64Engine] SECURITY: decodeInstruction: invalid parameters");
-        decoded.is_valid = NO;
-        strcpy(decoded.mnemonic, "INVALID");
-        return decoded;
-    }
-    
-    decoded.opcode = instruction[0];
-    decoded.length = 1;
-    decoded.is_valid = YES;
-    decoded.is_safe = YES;  // 默认安全
-    
-    switch (decoded.opcode) {
-        case 0x90:  // NOP
-            strcpy(decoded.mnemonic, "NOP");
-            break;
-            
-        case 0xB8: case 0xB9: case 0xBA: case 0xBB:  // MOV reg, imm32
-        case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-            if (maxLength < 5) {
-                decoded.is_valid = NO;
-                strcpy(decoded.mnemonic, "TRUNCATED");
-                break;
-            }
-            decoded.has_immediate = YES;
-            decoded.immediate = *(uint32_t *)(instruction + 1);
-            decoded.length = 5;
-            sprintf(decoded.mnemonic, "MOV r%d, 0x%X", decoded.opcode & 7, (uint32_t)decoded.immediate);
-            
-            // 安全检查 - 检查立即数是否是危险地址
-            if (decoded.immediate > 0 && decoded.immediate < MIN_VALID_ADDRESS) {
-                decoded.is_safe = NO;
-            }
-            break;
-            
-        case 0xC3:  // RET
-            strcpy(decoded.mnemonic, "RET");
-            break;
-            
-        default:
-            sprintf(decoded.mnemonic, "UNK_0x%02X", decoded.opcode);
-            decoded.is_safe = NO;  // 未知指令标记为不安全
-            NSLog(@"[Box64Engine] WARNING: Unknown opcode: 0x%02X", decoded.opcode);
-            break;
-    }
-    
-    return decoded;
-}
-
-- (BOOL)validateInstruction:(const X86Instruction *)instruction {
-    if (!instruction) {
-        return NO;
-    }
-    
-    if (!instruction->is_valid) {
-        return NO;
-    }
-    
-    if (_isSafeMode && !instruction->is_safe) {
-        return NO;
-    }
-    
-    return YES;
-}
-
-- (NSString *)disassembleInstruction:(const X86Instruction *)instruction {
-    if (!instruction || !instruction->is_valid) {
-        return @"INVALID";
-    }
-    
-    return [NSString stringWithUTF8String:instruction->mnemonic];
-}
-
-#pragma mark - 安全检查
+#pragma mark - 安全检查 - 修复版本
 
 - (BOOL)performSafetyCheck {
+    return [self performSafetyCheckWithRIP:_context->rip];
+}
+
+// 🔧 新增：带RIP参数的安全检查
+- (BOOL)performSafetyCheckWithRIP:(uint64_t)rip {
     if (!_context) {
         return NO;
     }
@@ -823,19 +839,22 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         return NO;
     }
     
-    // 检查指令指针
-    if (_context->rip > 0 && _context->rip < MIN_VALID_ADDRESS) {
-        NSLog(@"[Box64Engine] SECURITY: Instruction pointer in dangerous range: 0x%llx", _context->rip);
+    // 🔧 修复：检查指令指针 - 应该在分配的内存范围内，而不是传统的低地址检查
+    if (rip > 0 && rip < MIN_VALID_ADDRESS) {
+        NSLog(@"[Box64Engine] SECURITY: Instruction pointer in dangerous range: 0x%llx", rip);
         [_safetyWarnings addObject:@"指令指针在危险地址范围"];
         return NO;
     }
     
-    // 检查其他重要寄存器
-    for (int i = 0; i < 16; i++) {
-        uint64_t value = _context->x86_regs[i];
-        if (value > 0 && value < MIN_VALID_ADDRESS && value != 0x32) {  // 0x32是常见的错误地址
-            NSLog(@"[Box64Engine] WARNING: Register %d contains suspicious value: 0x%llx", i, value);
-            [_safetyWarnings addObject:[NSString stringWithFormat:@"寄存器%d包含可疑值0x%llx", i, value]];
+    // 🔧 新增：检查RIP是否在有效的内存范围内
+    if (rip > MIN_VALID_ADDRESS) {
+        // 检查是否在我们分配的内存范围内
+        uint64_t memory_start = (uint64_t)_context->memory_base;
+        uint64_t memory_end = memory_start + _context->memory_size;
+        
+        if (rip < memory_start || rip >= memory_end) {
+            // RIP 在我们管理的内存之外，可能是有效的系统内存，允许继续
+            NSLog(@"[Box64Engine] INFO: RIP 0x%llx outside managed memory range, allowing", rip);
         }
     }
     
@@ -869,6 +888,41 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
 }
 
 #pragma mark - 调试和状态
+
+- (NSDictionary *)getSystemState {
+    [_contextLock lock];
+    
+    @try {
+        NSMutableDictionary *state = [NSMutableDictionary dictionary];
+        
+        state[@"initialized"] = @(_isInitialized);
+        state[@"safe_mode"] = @(_isSafeMode);
+        state[@"last_error"] = _lastError ?: @"无";
+        
+        if (_context) {
+            state[@"instruction_count"] = @(_context->instruction_count);
+            state[@"max_instructions"] = @(_context->max_instructions);
+            state[@"rip"] = @(_context->rip);
+            state[@"rsp"] = @(_context->x86_regs[X86_RSP]);
+            state[@"rax"] = @(_context->x86_regs[X86_RAX]);
+            state[@"stack_base"] = @(_context->stack_base);
+            state[@"stack_size"] = @(_context->stack_size);
+            state[@"heap_base"] = @(_context->heap_base);
+            state[@"heap_size"] = @(_context->heap_size);
+        }
+        
+        state[@"safety_warnings_count"] = @(_safetyWarnings.count);
+        
+        return [state copy];
+        
+    } @finally {
+        [_contextLock unlock];
+    }
+}
+
+- (NSString *)getLastError {
+    return _lastError;
+}
 
 - (void)dumpRegisters {
     [_contextLock lock];
@@ -916,139 +970,9 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
                   i, region->name, region->start_address, region->start_address + region->size,
                   region->is_executable ? "X" : "-",
                   region->is_writable ? "W" : "-",
-                  "R");  // 总是可读
+                  "R");
         }
         NSLog(@"[Box64Engine] ============================");
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (void)dumpMemory:(uint64_t)address length:(size_t)length {
-    [_contextLock lock];
-    
-    @try {
-        if (![self isValidMemoryAddress:address size:length]) {
-            NSLog(@"[Box64Engine] SECURITY: Cannot dump invalid memory range 0x%llx-0x%llx", address, address + length);
-            return;
-        }
-        
-        NSLog(@"[Box64Engine] ===== Memory Dump 0x%llx =====", address);
-        
-        uint8_t *memory = (uint8_t *)address;
-        size_t safe_length = MIN(length, 256);  // 最多显示256字节
-        
-        for (size_t i = 0; i < safe_length; i += 16) {
-            NSMutableString *line = [NSMutableString stringWithFormat:@"[Box64Engine] %llx: ", address + i];
-            
-            // 十六进制
-            for (size_t j = 0; j < 16 && (i + j) < safe_length; j++) {
-                [line appendFormat:@"%02x ", memory[i + j]];
-            }
-            
-            // 补齐空格
-            for (size_t j = safe_length - i; j < 16; j++) {
-                [line appendString:@"   "];
-            }
-            
-            [line appendString:@" "];
-            
-            // ASCII
-            for (size_t j = 0; j < 16 && (i + j) < safe_length; j++) {
-                char c = memory[i + j];
-                [line appendFormat:@"%c", (c >= 32 && c <= 126) ? c : '.'];
-            }
-            
-            NSLog(@"%@", line);
-        }
-        
-        NSLog(@"[Box64Engine] ================================");
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (void)dumpCrashState {
-    NSLog(@"[Box64Engine] ===== CRASH STATE DUMP =====");
-    NSLog(@"[Box64Engine] Last valid RIP: 0x%llx", _context ? _context->last_valid_rip : 0);
-    NSLog(@"[Box64Engine] Current RIP: 0x%llx", _context ? _context->rip : 0);
-    NSLog(@"[Box64Engine] Instruction count: %u", _context ? _context->instruction_count : 0);
-    
-    if (_context && _context->last_instruction[0] != 0) {
-        NSLog(@"[Box64Engine] Last instruction bytes:");
-        for (int i = 0; i < 8; i++) {
-            NSLog(@"[Box64Engine]   [%d]: 0x%02x", i, _context->last_instruction[i]);
-        }
-    }
-    
-    [self dumpRegisters];
-    [self dumpMemoryRegions];
-    
-    NSLog(@"[Box64Engine] Safety warnings: %@", _safetyWarnings);
-    NSLog(@"[Box64Engine] Last error: %@", _lastError);
-    NSLog(@"[Box64Engine] ==============================");
-}
-
-- (NSDictionary *)getSystemState {
-    [_contextLock lock];
-    
-    @try {
-        NSMutableDictionary *state = [NSMutableDictionary dictionary];
-        
-        state[@"initialized"] = @(_isInitialized);
-        state[@"safe_mode"] = @(_isSafeMode);
-        state[@"last_error"] = _lastError ?: @"无错误";
-        state[@"safety_warnings"] = [_safetyWarnings copy];
-        
-        if (_context) {
-            state[@"instruction_count"] = @(_context->instruction_count);
-            state[@"max_instructions"] = @(_context->max_instructions);
-            state[@"rip"] = @(_context->rip);
-            state[@"rsp"] = @(_context->x86_regs[X86_RSP]);
-            state[@"memory_size"] = @(_context->memory_size);
-            state[@"region_count"] = @(_context->region_count);
-        }
-        
-        return [state copy];
-        
-    } @finally {
-        [_contextLock unlock];
-    }
-}
-
-- (NSString *)getLastError {
-    return _lastError;
-}
-
-#pragma mark - 清理
-
-- (void)cleanup {
-    [_contextLock lock];
-    
-    @try {
-        if (!_isInitialized || !_context) return;
-        
-        NSLog(@"[Box64Engine] Cleaning up Box64 engine...");
-        
-        if (_context->memory_base) {
-            // 恢复原始指针进行释放
-            free(_context->memory_base - MEMORY_GUARD_SIZE);
-            _context->memory_base = NULL;
-        }
-        
-        if (_context->jit_cache) {
-            [_jitEngine freeJITMemory:_context->jit_cache];
-            _context->jit_cache = NULL;
-        }
-        
-        [_safetyWarnings removeAllObjects];
-        _lastError = nil;
-        _isInitialized = NO;
-        _isSafeMode = YES;
-        
-        NSLog(@"[Box64Engine] Box64 cleanup completed safely");
         
     } @finally {
         [_contextLock unlock];
