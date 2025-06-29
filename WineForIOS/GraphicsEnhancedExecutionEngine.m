@@ -1,5 +1,20 @@
-// GraphicsEnhancedExecutionEngine.m - 图形增强执行引擎实现（修复版本）
+// GraphicsEnhancedExecutionEngine.m - 图形增强执行引擎实现（线程安全修复版本）
 #import "GraphicsEnhancedExecutionEngine.h"
+
+// 线程安全宏定义
+#define ENSURE_MAIN_THREAD(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+#define ENSURE_MAIN_THREAD_SYNC(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_sync(dispatch_get_main_queue(), block); \
+    }
 
 @interface GraphicsEnhancedExecutionEngine() <CompleteExecutionEngineDelegate>
 @property (nonatomic, strong) CompleteExecutionEngine *coreEngine;
@@ -10,6 +25,7 @@
 @property (nonatomic, assign) BOOL graphicsEnabled;
 @property (nonatomic, strong) NSTimer *renderTimer;
 @property (nonatomic, strong) NSString *currentProgramPath;
+@property (nonatomic, strong) UIImageView *frameImageView;
 @end
 
 @implementation GraphicsEnhancedExecutionEngine
@@ -91,32 +107,34 @@
 }
 
 - (void)cleanup {
-    if (!_isInitialized) {
-        return;
-    }
-    
-    NSLog(@"[GraphicsEnhancedExecutionEngine] Cleaning up graphics-enhanced execution engine...");
-    
-    // 停止渲染定时器
-    if (_renderTimer) {
-        [_renderTimer invalidate];
-        _renderTimer = nil;
-    }
-    
-    [self stopExecution];
-    
-    if (_graphicsBridge) {
-        [_graphicsBridge cleanup];
-    }
-    
-    if (_coreEngine) {
-        [_coreEngine cleanup];
-    }
-    
-    _graphicsEnabled = NO;
-    _isInitialized = NO;
-    
-    NSLog(@"[GraphicsEnhancedExecutionEngine] Cleanup completed");
+    ENSURE_MAIN_THREAD(^{
+        if (!self->_isInitialized) {
+            return;
+        }
+        
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Cleaning up graphics-enhanced execution engine...");
+        
+        // 停止渲染定时器
+        if (self->_renderTimer) {
+            [self->_renderTimer invalidate];
+            self->_renderTimer = nil;
+        }
+        
+        [self stopExecution];
+        
+        if (self->_graphicsBridge) {
+            [self->_graphicsBridge cleanup];
+        }
+        
+        if (self->_coreEngine) {
+            [self->_coreEngine cleanup];
+        }
+        
+        self->_graphicsEnabled = NO;
+        self->_isInitialized = NO;
+        
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Cleanup completed");
+    });
 }
 
 #pragma mark - 程序执行
@@ -172,15 +190,15 @@
 }
 
 - (void)stopExecution {
-    if (!_isExecuting) return;
-    
     NSLog(@"[GraphicsEnhancedExecutionEngine] Stopping enhanced execution...");
     
     // 停止渲染循环
-    if (_renderTimer) {
-        [_renderTimer invalidate];
-        _renderTimer = nil;
-    }
+    ENSURE_MAIN_THREAD(^{
+        if (self->_renderTimer) {
+            [self->_renderTimer invalidate];
+            self->_renderTimer = nil;
+        }
+    });
     
     [_coreEngine stopExecution];
     _isExecuting = NO;
@@ -195,9 +213,13 @@
     
     if (enabled && _isExecuting) {
         [self startRenderLoop];
-    } else if (!enabled && _renderTimer) {
-        [_renderTimer invalidate];
-        _renderTimer = nil;
+    } else if (!enabled) {
+        ENSURE_MAIN_THREAD(^{
+            if (self->_renderTimer) {
+                [self->_renderTimer invalidate];
+                self->_renderTimer = nil;
+            }
+        });
     }
     
     NSLog(@"[GraphicsEnhancedExecutionEngine] Graphics output %@", enabled ? @"enabled" : @"disabled");
@@ -224,40 +246,95 @@
     return nil;
 }
 
-#pragma mark - 渲染循环
+#pragma mark - 渲染循环 - 线程安全修复
 
 - (void)startRenderLoop {
-    if (_renderTimer) {
-        [_renderTimer invalidate];
-    }
-    
-    // 60 FPS渲染循环
-    _renderTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
-                                                    target:self
-                                                  selector:@selector(renderFrame)
-                                                  userInfo:nil
-                                                   repeats:YES];
-    
-    NSLog(@"[GraphicsEnhancedExecutionEngine] Started render loop (60 FPS)");
+    ENSURE_MAIN_THREAD(^{
+        if (self->_renderTimer) {
+            [self->_renderTimer invalidate];
+        }
+        
+        // 60 FPS渲染循环 - 确保在主线程创建定时器
+        self->_renderTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
+                                                              target:self
+                                                            selector:@selector(renderFrame)
+                                                            userInfo:nil
+                                                             repeats:YES];
+        
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Started render loop (60 FPS) on main thread");
+    });
 }
 
 - (void)renderFrame {
-    if (!_isExecuting || !_graphicsEnabled) {
-        return;
-    }
-    
-    // 通知图形桥接器执行渲染
-    if (_graphicsBridge) {
-        [_graphicsBridge presentFrame];
-    }
-    
-    // 通知代理帧已渲染
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didRenderFrame:)]) {
-        UIImage *frameImage = [self captureCurrentFrame];
-        if (frameImage) {
-            [self.delegate graphicsEngine:self didRenderFrame:frameImage];
+    // 确保渲染操作在主线程执行
+    ENSURE_MAIN_THREAD(^{
+        if (!self->_isExecuting || !self->_graphicsEnabled) {
+            return;
         }
-    }
+        
+        // 通知图形桥接器执行渲染（Metal操作必须在主线程）
+        if (self->_graphicsBridge) {
+            [self->_graphicsBridge presentFrame];
+        }
+        
+        // 通知代理帧已渲染
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didRenderFrame:)]) {
+            UIImage *frameImage = [self captureCurrentFrame];
+            if (frameImage) {
+                [self.delegate graphicsEngine:self didRenderFrame:frameImage];
+            }
+        }
+    });
+}
+
+#pragma mark - 委托通知方法 - 线程安全修复
+
+- (void)notifyProgress:(float)progress status:(NSString *)status {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didUpdateProgress:status:)]) {
+            [self.delegate graphicsEngine:self didUpdateProgress:progress status:status];
+        }
+    });
+}
+
+- (void)notifyStartExecution:(NSString *)programPath {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didStartExecution:)]) {
+            [self.delegate graphicsEngine:self didStartExecution:programPath];
+        }
+    });
+}
+
+- (void)notifyFinishExecution:(NSString *)programPath result:(GraphicsExecutionResult)result {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didFinishExecution:result:)]) {
+            [self.delegate graphicsEngine:self didFinishExecution:programPath result:result];
+        }
+    });
+}
+
+- (void)notifyOutput:(NSString *)output {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didReceiveOutput:)]) {
+            [self.delegate graphicsEngine:self didReceiveOutput:output];
+        }
+    });
+}
+
+- (void)notifyError:(NSError *)error {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didEncounterError:)]) {
+            [self.delegate graphicsEngine:self didEncounterError:error];
+        }
+    });
+}
+
+- (void)notifyCreateWindow:(NSString *)windowTitle size:(CGSize)size {
+    ENSURE_MAIN_THREAD(^{
+        if ([self.delegate respondsToSelector:@selector(graphicsEngine:didCreateWindow:size:)]) {
+            [self.delegate graphicsEngine:self didCreateWindow:windowTitle size:size];
+        }
+    });
 }
 
 #pragma mark - 增强指令执行
@@ -361,7 +438,7 @@
     [status appendFormat:@"  Executing: %@\n", _isExecuting ? @"YES" : @"NO"];
     [status appendFormat:@"  Graphics Enabled: %@\n", _graphicsEnabled ? @"YES" : @"NO"];
     [status appendFormat:@"  Current Program: %@\n", _currentProgramPath ?: @"none"];
-    [status appendFormat:@"  Render Timer: %@\n", _renderTimer ? @"active" : @"inactive"];
+    [status appendFormat:@"  Render Timer: %@\n", _renderTimer ? @"ACTIVE" : @"INACTIVE"];
     
     if (_coreEngine) {
         [status appendFormat:@"  Core Engine: %@\n", [_coreEngine getEngineStatus]];
@@ -371,49 +448,46 @@
 }
 
 - (void)dumpDetailedStates {
-    NSLog(@"=== Graphics Enhanced Execution Engine State Dump ===");
+    NSLog(@"[GraphicsEnhancedExecutionEngine] ===== Detailed State Dump =====");
     NSLog(@"%@", [self getDetailedEngineStatus]);
     
-    if (_graphicsBridge) {
-        [_graphicsBridge dumpPipelineStates];
+    if (_coreEngine) {
+        [_coreEngine dumpAllStates];
     }
     
-    NSLog(@"=== End State Dump ===");
-}
-
-#pragma mark - 代理通知方法
-
-- (void)notifyStartExecution:(NSString *)programPath {
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didStartExecution:)]) {
-        [self.delegate graphicsEngine:self didStartExecution:programPath];
+    if (_graphicsBridge) {
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Vulkan Info: %@", [_graphicsBridge getVulkanInfo]);
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Metal Info: %@", [_graphicsBridge getMetalInfo]);
     }
+    
+    NSLog(@"[GraphicsEnhancedExecutionEngine] ===============================");
 }
 
-- (void)notifyFinishExecution:(NSString *)programPath result:(GraphicsExecutionResult)result {
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didFinishExecution:result:)]) {
-        [self.delegate graphicsEngine:self didFinishExecution:programPath result:result];
+#pragma mark - CompleteExecutionEngineDelegate实现
+
+- (void)executionEngine:(CompleteExecutionEngine *)engine didStartExecution:(NSString *)programPath {
+    [self notifyStartExecution:programPath];
+}
+
+- (void)executionEngine:(CompleteExecutionEngine *)engine didFinishExecution:(NSString *)programPath result:(ExecutionResult)result {
+    GraphicsExecutionResult graphicsResult;
+    switch (result) {
+        case ExecutionResultSuccess:
+            graphicsResult = GraphicsExecutionResultSuccess;
+            break;
+        case ExecutionResultInvalidFile:
+            graphicsResult = GraphicsExecutionResultInvalidFile;
+            break;
+        default:
+            graphicsResult = GraphicsExecutionResultFailure;
+            break;
     }
+    [self notifyFinishExecution:programPath result:graphicsResult];
 }
 
-- (void)notifyOutput:(NSString *)output {
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didReceiveOutput:)]) {
-        [self.delegate graphicsEngine:self didReceiveOutput:output];
-    }
+- (void)executionEngine:(CompleteExecutionEngine *)engine didReceiveOutput:(NSString *)output {
+    [self notifyOutput:output];
 }
-
-- (void)notifyError:(NSError *)error {
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didEncounterError:)]) {
-        [self.delegate graphicsEngine:self didEncounterError:error];
-    }
-}
-
-- (void)notifyProgress:(float)progress status:(NSString *)status {
-    if ([self.delegate respondsToSelector:@selector(graphicsEngine:didUpdateProgress:status:)]) {
-        [self.delegate graphicsEngine:self didUpdateProgress:progress status:status];
-    }
-}
-
-#pragma mark - CompleteExecutionEngineDelegate
 
 - (void)executionEngine:(CompleteExecutionEngine *)engine didEncounterError:(NSError *)error {
     [self notifyError:error];
@@ -421,10 +495,6 @@
 
 - (void)executionEngine:(CompleteExecutionEngine *)engine didUpdateProgress:(float)progress status:(NSString *)status {
     [self notifyProgress:progress status:status];
-}
-
-- (void)executionEngine:(CompleteExecutionEngine *)engine didReceiveOutput:(NSString *)output {
-    [self notifyOutput:output];
 }
 
 @end

@@ -1,11 +1,26 @@
 // FinalMainViewController.m - 实现
 #import "FinalMainViewController.h"
 
+#define ENSURE_MAIN_THREAD(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+#define ENSURE_MAIN_THREAD_SYNC(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_sync(dispatch_get_main_queue(), block); \
+    }
+
 @interface FinalMainViewController ()
 
 // UI组件
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *mainStackView;
+@property (nonatomic, strong) UIImageView *frameImageView;
 
 // 状态区域
 @property (nonatomic, strong) UIView *statusCard;

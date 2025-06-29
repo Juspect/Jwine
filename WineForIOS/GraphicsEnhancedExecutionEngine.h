@@ -1,4 +1,4 @@
-// GraphicsEnhancedExecutionEngine.h - 图形增强执行引擎
+// GraphicsEnhancedExecutionEngine.h - 图形增强执行引擎头文件（完整版本）
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import "CompleteExecutionEngine.h"
@@ -87,22 +87,6 @@ typedef NS_ENUM(NSInteger, GraphicsExecutionResult) {
 - (NSDictionary * _Nonnull)getDetailedSystemInfo;
 - (NSString * _Nonnull)getDetailedEngineStatus;
 - (void)dumpDetailedStates;
-
-@end
-
-// MARK: - CompleteExecutionEngineDelegate Implementation
-@interface GraphicsEnhancedExecutionEngine() <CompleteExecutionEngineDelegate>
-
-// 代理方法 - 修复空指针警告
-- (void)executionEngine:(CompleteExecutionEngine * _Nonnull)engine
-       didEncounterError:(NSError * _Nonnull)error;
-
-- (void)executionEngine:(CompleteExecutionEngine * _Nonnull)engine
-        didUpdateProgress:(float)progress
-                   status:(NSString * _Nonnull)status;
-
-- (void)executionEngine:(CompleteExecutionEngine * _Nonnull)engine
-         didReceiveOutput:(NSString * _Nonnull)output;
 
 @end
 

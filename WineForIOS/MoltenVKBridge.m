@@ -1,5 +1,20 @@
-// MoltenVKBridge.m - Vulkan到Metal图形桥接系统实现
+// MoltenVKBridge.m - Vulkan到Metal图形桥接系统实现（线程安全修复版本）
 #import "MoltenVKBridge.h"
+
+// 线程安全宏定义
+#define ENSURE_MAIN_THREAD(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_async(dispatch_get_main_queue(), block); \
+    }
+
+#define ENSURE_MAIN_THREAD_SYNC(block) \
+    if ([NSThread isMainThread]) { \
+        block(); \
+    } else { \
+        dispatch_sync(dispatch_get_main_queue(), block); \
+    }
 
 // 内部Vulkan对象模拟结构
 typedef struct VulkanInstanceMock {
@@ -295,89 +310,87 @@ typedef struct VulkanCommandBufferMock {
     return self;
 }
 
-- (void)dealloc {
-    [self cleanup];
-}
-
-#pragma mark - 初始化和清理
+#pragma mark - 初始化和清理 - 线程安全修复
 
 - (BOOL)initializeWithView:(UIView *)containerView {
-    if (_isInitialized) {
-        NSLog(@"[MoltenVKBridge] Already initialized");
-        return YES;
-    }
+    __block BOOL result = NO;
     
-    NSLog(@"[MoltenVKBridge] Initializing Metal graphics system...");
+    ENSURE_MAIN_THREAD_SYNC(^{
+        if (self->_isInitialized) {
+            NSLog(@"[MoltenVKBridge] Already initialized");
+            result = YES;
+            return;
+        }
+        
+        NSLog(@"[MoltenVKBridge] Initializing Metal graphics system...");
+        
+        // 1. 创建Metal设备
+        self->_metalDevice = MTLCreateSystemDefaultDevice();
+        if (!self->_metalDevice) {
+            NSLog(@"[MoltenVKBridge] Failed to create Metal device");
+            result = NO;
+            return;
+        }
+        
+        NSLog(@"[MoltenVKBridge] Metal device: %@", self->_metalDevice.name);
+        
+        // 2. 创建命令队列
+        self->_metalCommandQueue = [self->_metalDevice newCommandQueue];
+        if (!self->_metalCommandQueue) {
+            NSLog(@"[MoltenVKBridge] Failed to create Metal command queue");
+            result = NO;
+            return;
+        }
+        
+        // 3. 设置Metal层（UI操作必须在主线程）
+        self->_metalLayer = [CAMetalLayer layer];
+        self->_metalLayer.device = self->_metalDevice;
+        self->_metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        self->_metalLayer.framebufferOnly = YES;
+        self->_metalLayer.frame = containerView.bounds;
+        
+        // 4. 添加到容器视图（UI操作）
+        [containerView.layer addSublayer:self->_metalLayer];
+        
+        // 5. 初始化转换器
+        self->_dxTranslator = [DirectXToVulkanTranslator translatorWithBridge:self];
+        
+        self->_isInitialized = YES;
+        NSLog(@"[MoltenVKBridge] Metal graphics system initialized successfully");
+        result = YES;
+    });
     
-    // 1. 创建Metal设备
-    _metalDevice = MTLCreateSystemDefaultDevice();
-    if (!_metalDevice) {
-        NSLog(@"[MoltenVKBridge] Failed to create Metal device");
-        return NO;
-    }
-    
-    NSLog(@"[MoltenVKBridge] Metal device: %@", _metalDevice.name);
-    
-    // 2. 创建命令队列
-    _metalCommandQueue = [_metalDevice newCommandQueue];
-    if (!_metalCommandQueue) {
-        NSLog(@"[MoltenVKBridge] Failed to create Metal command queue");
-        return NO;
-    }
-    
-    // 3. 设置Metal层
-    _metalLayer = [CAMetalLayer layer];
-    _metalLayer.device = _metalDevice;
-    _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    _metalLayer.framebufferOnly = YES;
-    _metalLayer.frame = containerView.bounds;
-    
-    // 4. 添加到容器视图
-    [containerView.layer addSublayer:_metalLayer];
-    
-    // 5. 创建MTKView用于简化渲染
-    _metalView = [[MTKView alloc] initWithFrame:containerView.bounds device:_metalDevice];
-    _metalView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    _metalView.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-    [containerView addSubview:_metalView];
-    
-    _isInitialized = YES;
-    NSLog(@"[MoltenVKBridge] Metal graphics initialization completed successfully");
-    
-    return YES;
+    return result;
 }
 
 - (void)cleanup {
-    if (!_isInitialized) return;
-    
-    NSLog(@"[MoltenVKBridge] Cleaning up Metal graphics system...");
-    
-    // 清理Vulkan对象
-    [_vulkanObjects removeAllObjects];
-    
-    // 清理Metal资源
-    if (_metalView) {
-        [_metalView removeFromSuperview];
-        _metalView = nil;
-    }
-    
-    if (_metalLayer) {
-        [_metalLayer removeFromSuperlayer];
-        _metalLayer = nil;
-    }
-    
-    _metalCommandQueue = nil;
-    _metalDevice = nil;
-    _isInitialized = NO;
-    
-    NSLog(@"[MoltenVKBridge] Cleanup completed");
+    ENSURE_MAIN_THREAD(^{
+        if (!self->_isInitialized) {
+            return;
+        }
+        
+        NSLog(@"[MoltenVKBridge] Cleaning up Metal graphics system...");
+        
+        if (self->_metalLayer) {
+            [self->_metalLayer removeFromSuperlayer];
+            self->_metalLayer = nil;
+        }
+        
+        self->_metalCommandQueue = nil;
+        self->_metalDevice = nil;
+        self->_dxTranslator = nil;
+        
+        [self->_vulkanObjects removeAllObjects];
+        
+        self->_isInitialized = NO;
+        NSLog(@"[MoltenVKBridge] Cleanup completed");
+    });
 }
 
-#pragma mark - Vulkan实例管理
+#pragma mark - Vulkan实例和设备管理
 
 - (VkResult)createVulkanInstance:(VkInstance *)instance {
-    if (!_isInitialized) {
-        NSLog(@"[MoltenVKBridge] Not initialized");
+    if (!_metalDevice) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     
@@ -385,31 +398,15 @@ typedef struct VulkanCommandBufferMock {
     mockInstance->metalDevice = _metalDevice;
     mockInstance->isValid = YES;
     
-    NSNumber *instanceId = @(_objectIdCounter++);
-    _vulkanObjects[instanceId] = [NSValue valueWithPointer:mockInstance];
+    *instance = (VkInstance)mockInstance;
     
-    *instance = (VkInstance)(uintptr_t)instanceId.integerValue;
+    // 存储对象引用
+    NSNumber *instanceId = @((uintptr_t)*instance);
+    _vulkanObjects[instanceId] = [NSValue valueWithPointer:mockInstance];
     
     NSLog(@"[MoltenVKBridge] Created Vulkan instance: %p", *instance);
     return VK_SUCCESS;
 }
-
-- (void)destroyVulkanInstance:(VkInstance)instance {
-    NSNumber *instanceId = @((uintptr_t)instance);
-    NSValue *value = _vulkanObjects[instanceId];
-    
-    if (value) {
-        VulkanInstanceMock *mockInstance = (VulkanInstanceMock *)[value pointerValue];
-        if (mockInstance) {
-            mockInstance->isValid = NO;
-            free(mockInstance);
-        }
-        [_vulkanObjects removeObjectForKey:instanceId];
-        NSLog(@"[MoltenVKBridge] Destroyed Vulkan instance: %p", instance);
-    }
-}
-
-#pragma mark - 设备管理
 
 - (VkResult)createVulkanDevice:(VkDevice *)device fromInstance:(VkInstance)instance {
     VulkanDeviceMock *mockDevice = malloc(sizeof(VulkanDeviceMock));
@@ -417,85 +414,72 @@ typedef struct VulkanCommandBufferMock {
     mockDevice->commandQueue = _metalCommandQueue;
     mockDevice->isValid = YES;
     
-    NSNumber *deviceId = @(_objectIdCounter++);
-    _vulkanObjects[deviceId] = [NSValue valueWithPointer:mockDevice];
+    *device = (VkDevice)mockDevice;
     
-    *device = (VkDevice)(uintptr_t)deviceId.integerValue;
+    // 存储对象引用
+    NSNumber *deviceId = @((uintptr_t)*device);
+    _vulkanObjects[deviceId] = [NSValue valueWithPointer:mockDevice];
     
     NSLog(@"[MoltenVKBridge] Created Vulkan device: %p", *device);
     return VK_SUCCESS;
 }
 
-- (void)destroyVulkanDevice:(VkDevice)device {
-    NSNumber *deviceId = @((uintptr_t)device);
-    NSValue *value = _vulkanObjects[deviceId];
+#pragma mark - Vulkan表面和交换链
+
+- (VkResult)createVulkanSurface:(VkSurfaceKHR *)surface
+                       instance:(VkInstance)instance
+                           view:(UIView *)view {
     
-    if (value) {
-        VulkanDeviceMock *mockDevice = (VulkanDeviceMock *)[value pointerValue];
-        if (mockDevice) {
-            mockDevice->isValid = NO;
-            free(mockDevice);
-        }
-        [_vulkanObjects removeObjectForKey:deviceId];
-        NSLog(@"[MoltenVKBridge] Destroyed Vulkan device: %p", device);
-    }
-}
-
-#pragma mark - 表面和交换链管理
-
-- (VkResult)createSurface:(VkSurfaceKHR *)surface forView:(UIView *)view instance:(VkInstance)instance {
     VulkanSurfaceMock *mockSurface = malloc(sizeof(VulkanSurfaceMock));
     mockSurface->metalLayer = _metalLayer;
     mockSurface->targetView = view;
     mockSurface->isValid = YES;
     
-    NSNumber *surfaceId = @(_objectIdCounter++);
+    *surface = (VkSurfaceKHR)mockSurface;
+    
+    // 存储对象引用
+    NSNumber *surfaceId = @((uintptr_t)*surface);
     _vulkanObjects[surfaceId] = [NSValue valueWithPointer:mockSurface];
     
-    *surface = (VkSurfaceKHR)(uintptr_t)surfaceId.integerValue;
-    
-    NSLog(@"[MoltenVKBridge] Created Vulkan surface: %p for view: %@", *surface, view);
+    NSLog(@"[MoltenVKBridge] Created Vulkan surface: %p", *surface);
     return VK_SUCCESS;
 }
 
 - (VkResult)createSwapchain:(VkSwapchainKHR *)swapchain
-                    surface:(VkSurfaceKHR)surface
                      device:(VkDevice)device
-                     format:(VkFormat)format
+                    surface:(VkSurfaceKHR)surface
                       width:(uint32_t)width
                      height:(uint32_t)height {
     
     VulkanSwapchainMock *mockSwapchain = malloc(sizeof(VulkanSwapchainMock));
     mockSwapchain->metalLayer = _metalLayer;
-    mockSwapchain->format = format;
+    mockSwapchain->format = VK_FORMAT_B8G8R8A8_UNORM;
     mockSwapchain->width = width;
     mockSwapchain->height = height;
     mockSwapchain->isValid = YES;
     
-    // 更新Metal层尺寸
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.metalLayer.drawableSize = CGSizeMake(width, height);
-    });
+    *swapchain = (VkSwapchainKHR)mockSwapchain;
     
-    NSNumber *swapchainId = @(_objectIdCounter++);
+    // 存储对象引用
+    NSNumber *swapchainId = @((uintptr_t)*swapchain);
     _vulkanObjects[swapchainId] = [NSValue valueWithPointer:mockSwapchain];
     
-    *swapchain = (VkSwapchainKHR)(uintptr_t)swapchainId.integerValue;
-    
-    NSLog(@"[MoltenVKBridge] Created swapchain: %p (%dx%d, format: %d)",
-          *swapchain, width, height, format);
+    NSLog(@"[MoltenVKBridge] Created swapchain: %p (%dx%d)", *swapchain, width, height);
     return VK_SUCCESS;
 }
 
-#pragma mark - 渲染管道管理
+#pragma mark - 图形管道
 
-- (VkResult)createRenderPass:(VkRenderPass *)renderPass device:(VkDevice)device format:(VkFormat)format {
-    // 在Metal中，RenderPass的概念被MTLRenderPassDescriptor替代
-    // 这里我们只是创建一个标识符
-    NSNumber *renderPassId = @(_objectIdCounter++);
-    _vulkanObjects[renderPassId] = @{@"type": @"renderpass", @"format": @(format)};
+- (VkResult)createRenderPass:(VkRenderPass *)renderPass
+                      device:(VkDevice)device
+                      format:(VkFormat)format {
     
-    *renderPass = (VkRenderPass)(uintptr_t)renderPassId.integerValue;
+    // 创建简化的渲染通道模拟
+    *renderPass = (VkRenderPass)(uintptr_t)_objectIdCounter++;
+    
+    // 存储对象引用
+    NSNumber *renderPassId = @((uintptr_t)*renderPass);
+    _vulkanObjects[renderPassId] = @{@"type": @"renderpass", @"format": @(format)};
     
     NSLog(@"[MoltenVKBridge] Created render pass: %p", *renderPass);
     return VK_SUCCESS;
@@ -505,78 +489,36 @@ typedef struct VulkanCommandBufferMock {
                             device:(VkDevice)device
                         renderPass:(VkRenderPass)renderPass {
     
-    // 创建基础的Metal渲染管道状态
-    MTLRenderPipelineDescriptor *pipelineDesc = [[MTLRenderPipelineDescriptor alloc] init];
-    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // 创建简化的图形管道模拟
+    *pipeline = (VkPipeline)(uintptr_t)_objectIdCounter++;
     
-    // 创建简单的顶点和片段着色器
-    NSString *vertexShaderSource = @
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "struct VertexOut {\n"
-    "    float4 position [[position]];\n"
-    "    float4 color;\n"
-    "};\n"
-    "vertex VertexOut vertex_main(uint vertexID [[vertex_id]]) {\n"
-    "    VertexOut out;\n"
-    "    float2 positions[3] = {float2(0.0, 0.5), float2(-0.5, -0.5), float2(0.5, -0.5)};\n"
-    "    out.position = float4(positions[vertexID], 0.0, 1.0);\n"
-    "    out.color = float4(1.0, 0.0, 0.0, 1.0);\n"
-    "    return out;\n"
-    "}\n";
+    // 存储对象引用
+    NSNumber *pipelineId = @((uintptr_t)*pipeline);
+    _vulkanObjects[pipelineId] = @{@"type": @"pipeline", @"renderpass": @((uintptr_t)renderPass)};
     
-    NSString *fragmentShaderSource = @
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "struct VertexOut {\n"
-    "    float4 position [[position]];\n"
-    "    float4 color;\n"
-    "};\n"
-    "fragment float4 fragment_main(VertexOut in [[stage_in]]) {\n"
-    "    return in.color;\n"
-    "}\n";
-    
-    NSError *error = nil;
-    id<MTLLibrary> library = [_metalDevice newLibraryWithSource:vertexShaderSource options:nil error:&error];
-    
-    if (library) {
-        pipelineDesc.vertexFunction = [library newFunctionWithName:@"vertex_main"];
-        pipelineDesc.fragmentFunction = [library newFunctionWithName:@"fragment_main"];
-        
-        id<MTLRenderPipelineState> pipelineState = [_metalDevice newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
-        
-        if (pipelineState) {
-            NSNumber *pipelineId = @(_objectIdCounter++);
-            _vulkanObjects[pipelineId] = @{@"type": @"pipeline", @"metalPipeline": pipelineState};
-            
-            *pipeline = (VkPipeline)(uintptr_t)pipelineId.integerValue;
-            NSLog(@"[MoltenVKBridge] Created graphics pipeline: %p", *pipeline);
-            return VK_SUCCESS;
-        }
-    }
-    
-    NSLog(@"[MoltenVKBridge] Failed to create graphics pipeline: %@", error);
-    return VK_ERROR_INITIALIZATION_FAILED;
+    NSLog(@"[MoltenVKBridge] Created graphics pipeline: %p", *pipeline);
+    return VK_SUCCESS;
 }
 
-#pragma mark - 命令缓冲区管理
+#pragma mark - 命令缓冲区操作
 
 - (VkResult)createCommandBuffer:(VkCommandBuffer *)commandBuffer device:(VkDevice)device {
-    id<MTLCommandBuffer> metalCmdBuffer = [_metalCommandQueue commandBuffer];
-    if (!metalCmdBuffer) {
+    id<MTLCommandBuffer> metalCommandBuffer = [_metalCommandQueue commandBuffer];
+    if (!metalCommandBuffer) {
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
     
     VulkanCommandBufferMock *mockCmdBuffer = malloc(sizeof(VulkanCommandBufferMock));
-    mockCmdBuffer->metalCommandBuffer = metalCmdBuffer;
+    mockCmdBuffer->metalCommandBuffer = metalCommandBuffer;
     mockCmdBuffer->currentEncoder = nil;
     mockCmdBuffer->isRecording = NO;
     mockCmdBuffer->isValid = YES;
     
-    NSNumber *cmdBufferId = @(_objectIdCounter++);
-    _vulkanObjects[cmdBufferId] = [NSValue valueWithPointer:mockCmdBuffer];
+    *commandBuffer = (VkCommandBuffer)mockCmdBuffer;
     
-    *commandBuffer = (VkCommandBuffer)(uintptr_t)cmdBufferId.integerValue;
+    // 存储对象引用
+    NSNumber *cmdBufferId = @((uintptr_t)*commandBuffer);
+    _vulkanObjects[cmdBufferId] = [NSValue valueWithPointer:mockCmdBuffer];
     
     NSLog(@"[MoltenVKBridge] Created command buffer: %p", *commandBuffer);
     return VK_SUCCESS;
@@ -700,17 +642,48 @@ typedef struct VulkanCommandBufferMock {
     return [_dxTranslator translateDirectXCall:functionName parameters:parameters];
 }
 
-#pragma mark - Metal操作
+#pragma mark - Metal操作 - 线程安全修复
 
 - (void)presentFrame {
-    // 这个方法将在实际渲染时调用
-    NSLog(@"[MoltenVKBridge] Present frame");
+    ENSURE_MAIN_THREAD(^{
+        if (!self->_isInitialized || !self->_metalLayer) {
+            return;
+        }
+        
+        // 获取当前可绘制对象
+        id<CAMetalDrawable> drawable = [self->_metalLayer nextDrawable];
+        if (!drawable) {
+            return;
+        }
+        
+        // 创建命令缓冲区
+        id<MTLCommandBuffer> commandBuffer = [self->_metalCommandQueue commandBuffer];
+        if (!commandBuffer) {
+            return;
+        }
+        
+        // 简单的清屏操作
+        MTLRenderPassDescriptor *renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+        renderPassDescriptor.colorAttachments[0].texture = drawable.texture;
+        renderPassDescriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.2, 0.2, 0.2, 1.0);
+        renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+        
+        id<MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+        [renderEncoder endEncoding];
+        
+        // 提交到GPU
+        [commandBuffer presentDrawable:drawable];
+        [commandBuffer commit];
+    });
 }
 
 - (void)resizeToWidth:(CGFloat)width height:(CGFloat)height {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.metalLayer.drawableSize = CGSizeMake(width, height);
-        self.metalView.frame = CGRectMake(0, 0, width, height);
+    ENSURE_MAIN_THREAD(^{
+        self->_metalLayer.drawableSize = CGSizeMake(width, height);
+        if (self->_metalView) {
+            self->_metalView.frame = CGRectMake(0, 0, width, height);
+        }
         NSLog(@"[MoltenVKBridge] Resized to %.0fx%.0f", width, height);
     });
 }
@@ -729,21 +702,38 @@ typedef struct VulkanCommandBufferMock {
     return @{
         @"device_name": _metalDevice.name ?: @"Unknown",
         @"device_supports_compute": @([_metalDevice supportsFamily:MTLGPUFamilyMac2]),
-        @"command_queue_label": _metalCommandQueue.label ?: @"Default Queue",
-        @"layer_pixel_format": @(_metalLayer.pixelFormat)
+        @"command_queue_label": _metalCommandQueue.label ?: @"Default",
+        @"metal_layer_frame": NSStringFromCGRect(_metalLayer.frame),
+        @"metal_layer_drawable_size": NSStringFromCGSize(_metalLayer.drawableSize),
+        @"pixel_format": @(_metalLayer.pixelFormat)
     };
 }
 
-- (void)dumpPipelineStates {
-    NSLog(@"[MoltenVKBridge] ===== Pipeline States =====");
-    for (NSNumber *objectId in _vulkanObjects.allKeys) {
-        id object = _vulkanObjects[objectId];
-        if ([object isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *dict = (NSDictionary *)object;
-            NSLog(@"[MoltenVKBridge] Object %@: %@", objectId, dict[@"type"]);
+- (void)dumpVulkanObjects {
+    NSLog(@"[MoltenVKBridge] ===== Vulkan Objects Dump =====");
+    for (NSNumber *objectId in _vulkanObjects) {
+        NSValue *value = _vulkanObjects[objectId];
+        NSLog(@"[MoltenVKBridge] Object ID: %@ -> %@", objectId, value);
+    }
+    NSLog(@"[MoltenVKBridge] Total objects: %lu", (unsigned long)_vulkanObjects.count);
+    NSLog(@"[MoltenVKBridge] ==============================");
+}
+
+#pragma mark - 内存管理
+
+- (void)dealloc {
+    [self cleanup];
+    
+    // 释放所有Vulkan对象模拟结构
+    for (NSValue *value in _vulkanObjects.allValues) {
+        if (value) {
+            void *ptr = [value pointerValue];
+            if (ptr) {
+                free(ptr);
+            }
         }
     }
-    NSLog(@"[MoltenVKBridge] ==============================");
+    [_vulkanObjects removeAllObjects];
 }
 
 @end
