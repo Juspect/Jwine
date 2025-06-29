@@ -44,17 +44,19 @@ typedef NS_ENUM(NSInteger, ExecutionResult) {
 + (instancetype)sharedEngine;
 
 // 初始化和配置
-- (BOOL)initializeEngines;  // 修改方法名以匹配实现
+- (BOOL)initializeEngines;
+- (BOOL)initializeWithViewController:(UIViewController *)viewController;
 - (void)cleanup;
 
 // 程序执行
-- (void)executeProgram:(NSString *)programPath;  // 修改为异步执行
+- (ExecutionResult)executeProgram:(NSString *)programPath;
+- (ExecutionResult)executeProgram:(NSString *)programPath arguments:(nullable NSArray<NSString *> *)arguments;
 - (void)stopExecution;
 
 // 系统状态
 - (NSDictionary *)getSystemInfo;
 - (NSString *)getEngineStatus;
-- (NSArray<NSString *> *)getExecutionLog;  // 新增方法
+- (NSArray<NSString *> *)getExecutionLog;
 - (void)dumpAllStates;
 
 @end

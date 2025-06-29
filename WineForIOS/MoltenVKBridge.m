@@ -670,8 +670,11 @@ NSError *MoltenVKBridgeError(NSString *domain, NSInteger code, NSString *descrip
         
         if (_metalDevice) {
             info[@"device_name"] = _metalDevice.name ?: @"Unknown";
-            info[@"location"] = @(_metalDevice.location);
-            info[@"location_number"] = @(_metalDevice.locationNumber);
+            
+            // 修复：删除不存在的属性
+            // info[@"location"] = @(_metalDevice.location);
+            // info[@"location_number"] = @(_metalDevice.locationNumber);
+            
             info[@"max_threads_per_threadgroup"] = @(_metalDevice.maxThreadsPerThreadgroup.width);
             info[@"has_unified_memory"] = @(_metalDevice.hasUnifiedMemory);
             info[@"supports_raytracing"] = @(_metalDevice.supportsRaytracing);
@@ -712,7 +715,8 @@ NSError *MoltenVKBridgeError(NSString *domain, NSInteger code, NSString *descrip
                 @"frame_size": NSStringFromCGRect(_metalLayer.frame),
                 @"drawable_size": NSStringFromCGSize(_metalLayer.drawableSize),
                 @"framebuffer_only": @(_metalLayer.framebufferOnly),
-                @"display_sync_enabled": @(_metalLayer.displaySyncEnabled)
+                // 修复：删除不存在的属性
+                // @"display_sync_enabled": @(_metalLayer.displaySyncEnabled)
             };
         }
         

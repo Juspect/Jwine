@@ -67,6 +67,10 @@
 #pragma mark - 初始化 - 线程安全版本
 
 - (BOOL)initializeEngines {
+    return [self initializeWithViewController:nil];
+}
+
+- (BOOL)initializeWithViewController:(UIViewController *)viewController {
     [_executionLock lock];
     
     @try {
@@ -76,6 +80,8 @@
         }
         
         NSLog(@"[CompleteExecutionEngine] Starting enhanced initialization...");
+        
+        _hostViewController = viewController;
         
         // 清空执行日志
         [_executionLog removeAllObjects];
@@ -199,26 +205,30 @@
 
 #pragma mark - 程序执行 - 安全版本
 
-- (void)executeProgram:(NSString *)programPath {
+- (ExecutionResult)executeProgram:(NSString *)programPath {
+    return [self executeProgram:programPath arguments:nil];
+}
+
+- (ExecutionResult)executeProgram:(NSString *)programPath arguments:(nullable NSArray<NSString *> *)arguments {
     [_executionLock lock];
     
     @try {
         if (!_isInitialized) {
             NSLog(@"[CompleteExecutionEngine] SECURITY: Cannot execute - engine not initialized");
             [self notifyErrorSync:[NSError errorWithDomain:@"ExecutionEngine" code:ExecutionResultNotInitialized userInfo:@{NSLocalizedDescriptionKey: @"执行引擎未初始化"}]];
-            return;
+            return ExecutionResultNotInitialized;
         }
         
         if (_isExecuting) {
             NSLog(@"[CompleteExecutionEngine] SECURITY: Already executing a program");
             [self notifyErrorSync:[NSError errorWithDomain:@"ExecutionEngine" code:ExecutionResultAlreadyExecuting userInfo:@{NSLocalizedDescriptionKey: @"已有程序在执行中"}]];
-            return;
+            return ExecutionResultAlreadyExecuting;
         }
         
         if (!programPath || ![NSFileManager.defaultManager fileExistsAtPath:programPath]) {
             NSLog(@"[CompleteExecutionEngine] SECURITY: Invalid program path: %@", programPath);
             [self notifyErrorSync:[NSError errorWithDomain:@"ExecutionEngine" code:ExecutionResultInvalidFile userInfo:@{NSLocalizedDescriptionKey: @"程序文件不存在"}]];
-            return;
+            return ExecutionResultInvalidFile;
         }
         
         NSLog(@"[CompleteExecutionEngine] Starting secure execution of: %@", programPath);
@@ -237,14 +247,11 @@
         // 设置安全定时器 - 10秒超时
         [self setupSafetyTimer:10.0];
         
-        // 在后台线程执行程序
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            ExecutionResult result = [self executeFileAtPath:programPath];
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self finishExecution:result];
-            });
-        });
+        // 同步执行程序
+        ExecutionResult result = [self executeFileAtPath:programPath arguments:arguments];
+        
+        [self finishExecution:result];
+        return result;
         
     } @finally {
         [_executionLock unlock];
@@ -285,7 +292,7 @@
     }
 }
 
-- (ExecutionResult)executeFileAtPath:(NSString *)filePath {
+- (ExecutionResult)executeFileAtPath:(NSString *)filePath arguments:(nullable NSArray<NSString *> *)arguments {
     NSLog(@"[CompleteExecutionEngine] Executing file with enhanced safety: %@", filePath);
     
     @try {
@@ -331,10 +338,10 @@
         
         [self notifyProgress:0.7 status:@"执行程序代码..."];
         
-        // 执行程序代码 - 使用安全模式
-        BOOL executionSuccess = [_box64Engine executeWithSafetyCheck:programData.bytes
-                                                              length:programData.length
-                                                      maxInstructions:1000];  // 限制最大指令数
+        // 执行程序代码 - 使用安全模式，修复0x32问题
+        BOOL executionSuccess = [self executeCodeSafely:programData.bytes
+                                                 length:programData.length
+                                        maxInstructions:1000];
         
         if (!executionSuccess) {
             NSLog(@"[CompleteExecutionEngine] SECURITY: Code execution failed");
@@ -383,6 +390,39 @@
         
         return ExecutionResultCrash;
     }
+}
+
+// 修复0x32问题的安全执行方法
+- (BOOL)executeCodeSafely:(const uint8_t *)code length:(size_t)length maxInstructions:(uint32_t)maxInstructions {
+    // 额外的0x32地址检查
+    for (size_t i = 0; i < length - 4; i++) {
+        uint32_t *addr = (uint32_t *)(code + i);
+        if (*addr == 0x32 || *addr == 0x00000032) {
+            NSLog(@"[CompleteExecutionEngine] SECURITY: Detected suspicious 0x32 address at offset %zu", i);
+            // 在安全模式下，将0x32替换为安全值
+            if (_box64Engine.isSafeMode) {
+                [_executionLog addObject:@"⚠️ 检测到0x32地址，已在安全模式下处理"];
+                // 创建安全的代码副本
+                uint8_t *safeCopy = malloc(length);
+                memcpy(safeCopy, code, length);
+                
+                // 将可疑的0x32地址替换为安全值（如0x1000）
+                uint32_t *safeAddr = (uint32_t *)(safeCopy + i);
+                *safeAddr = 0x1000;  // 替换为安全地址
+                
+                BOOL result = [_box64Engine executeWithSafetyCheck:safeCopy
+                                                           length:length
+                                                   maxInstructions:maxInstructions];
+                free(safeCopy);
+                return result;
+            }
+        }
+    }
+    
+    // 常规执行
+    return [_box64Engine executeWithSafetyCheck:code
+                                         length:length
+                                 maxInstructions:maxInstructions];
 }
 
 - (BOOL)performPreExecutionSafetyCheck {
@@ -683,6 +723,11 @@
     } @finally {
         [_executionLock unlock];
     }
+}
+
+- (void)dumpAllStates {
+    NSLog(@"[CompleteExecutionEngine] Dumping all system states...");
+    [self dumpCrashState];
 }
 
 #pragma mark - 委托通知方法 - 线程安全版本
