@@ -15,7 +15,8 @@
         dispatch_sync(dispatch_get_main_queue(), block); \
     }
 
-@interface FinalMainViewController ()
+@interface FinalMainViewController () <UIDocumentPickerDelegate, GraphicsEnhancedExecutionEngineDelegate>
+// 保持原有属性不变...
 
 // UI组件
 @property (nonatomic, strong) UIScrollView *scrollView;
@@ -1123,23 +1124,45 @@
         
         if (startedAccessing) {
             NSString *fileName = selectedURL.lastPathComponent;
+            
+            // 🔧 修复：检查文件是否在Documents目录中
             NSString *documentsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-            NSString *destinationPath = [documentsPath stringByAppendingPathComponent:fileName];
+            NSString *selectedPath = selectedURL.path;
             
-            NSError *error;
-            [[NSFileManager defaultManager] removeItemAtPath:destinationPath error:nil];
-            
-            if ([[NSFileManager defaultManager] copyItemAtURL:selectedURL toURL:[NSURL fileURLWithPath:destinationPath] error:&error]) {
-                self.selectedFilePath = destinationPath;
+            if ([selectedPath hasPrefix:documentsPath]) {
+                // 文件在Documents目录中，直接使用原路径，不要复制
+                self.selectedFilePath = selectedPath;
                 self.runButton.enabled = YES;
                 
                 self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择: %@", fileName];
                 self.selectedFileLabel.textColor = [UIColor systemGreenColor];
                 
-                [self analyzeSelectedFile:destinationPath];
-                [self appendOutput:[NSString stringWithFormat:@"📁 已选择文件: %@", fileName]];
+                [self analyzeSelectedFile:selectedPath];
+                [self appendOutput:[NSString stringWithFormat:@"📁 已选择文件: %@ (原位置)", fileName]];
+                
+                NSLog(@"[FinalMainViewController] 文件在Documents目录中，直接使用原路径: %@", selectedPath);
             } else {
-                [self appendOutput:[NSString stringWithFormat:@"❌ 文件复制失败: %@", error.localizedDescription]];
+                // 文件不在Documents目录中，才进行复制
+                NSString *destinationPath = [documentsPath stringByAppendingPathComponent:fileName];
+                
+                NSError *error;
+                [[NSFileManager defaultManager] removeItemAtPath:destinationPath error:nil];
+                
+                if ([[NSFileManager defaultManager] copyItemAtURL:selectedURL toURL:[NSURL fileURLWithPath:destinationPath] error:&error]) {
+                    self.selectedFilePath = destinationPath;
+                    self.runButton.enabled = YES;
+                    
+                    self.selectedFileLabel.text = [NSString stringWithFormat:@"已选择: %@", fileName];
+                    self.selectedFileLabel.textColor = [UIColor systemGreenColor];
+                    
+                    [self analyzeSelectedFile:destinationPath];
+                    [self appendOutput:[NSString stringWithFormat:@"📁 已选择并复制文件: %@", fileName]];
+                    
+                    NSLog(@"[FinalMainViewController] 文件从外部位置复制到: %@", destinationPath);
+                } else {
+                    [self appendOutput:[NSString stringWithFormat:@"❌ 文件复制失败: %@", error.localizedDescription]];
+                    NSLog(@"[FinalMainViewController] 文件复制失败: %@", error.localizedDescription);
+                }
             }
             
             [selectedURL stopAccessingSecurityScopedResource];
