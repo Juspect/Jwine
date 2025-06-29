@@ -805,16 +805,9 @@
 - (void)selectFile {
     [self appendOutput:@"打开文件选择器..."];
     
-    UIDocumentPickerViewController *documentPicker;
-    
-    if (@available(iOS 14.0, *)) {
-        documentPicker = [[UIDocumentPickerViewController alloc]
-                          initForOpeningContentTypes:@[UTTypeItem, UTTypeExecutable]];
-    } else {
-        documentPicker = [[UIDocumentPickerViewController alloc]
-                          initWithDocumentTypes:@[@"public.item", @"com.microsoft.windows-executable"]
-                          inMode:UIDocumentPickerModeOpen];
-    }
+    // 由于项目最低支持iOS 16.6，直接使用新的API
+    UIDocumentPickerViewController *documentPicker = [[UIDocumentPickerViewController alloc]
+                                                     initForOpeningContentTypes:@[UTTypeItem, UTTypeExecutable]];
     
     documentPicker.delegate = self;
     documentPicker.allowsMultipleSelection = NO;

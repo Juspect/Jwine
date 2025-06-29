@@ -1,134 +1,118 @@
-// MoltenVKBridge.h - Vulkan到Metal图形桥接系统
+// MoltenVKBridge.h - 修复版本
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
-#import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Vulkan结构体模拟（简化版）
-typedef struct VkInstance_T* VkInstance;
-typedef struct VkDevice_T* VkDevice;
-typedef struct VkSurfaceKHR_T* VkSurfaceKHR;
-typedef struct VkSwapchainKHR_T* VkSwapchainKHR;
-typedef struct VkRenderPass_T* VkRenderPass;
-typedef struct VkPipeline_T* VkPipeline;
-typedef struct VkCommandBuffer_T* VkCommandBuffer;
+// Vulkan类型前向声明
+typedef void* VkInstance;
+typedef void* VkDevice;
+typedef void* VkSurfaceKHR;
+typedef void* VkSwapchainKHR;
+typedef void* VkCommandBuffer;
+typedef void* VkRenderPass;
+typedef void* VkPipeline;
+typedef uint32_t VkResult;
+typedef uint32_t VkFormat;
 
-typedef uint32_t VkFlags;
-typedef VkFlags VkSurfaceCreateFlagsKHR;
+// Vulkan常量
+#define VK_SUCCESS 0
+#define VK_ERROR_INITIALIZATION_FAILED -3
+#define VK_ERROR_OUT_OF_DEVICE_MEMORY -6
+#define VK_FORMAT_B8G8R8A8_UNORM 44
 
-// Vulkan基础类型
-typedef enum VkResult {
-    VK_SUCCESS = 0,
-    VK_ERROR_OUT_OF_HOST_MEMORY = -1,
-    VK_ERROR_OUT_OF_DEVICE_MEMORY = -2,
-    VK_ERROR_INITIALIZATION_FAILED = -3
-} VkResult;
+// 前向声明
+@class MoltenVKBridge;
 
-typedef enum VkFormat {
-    VK_FORMAT_B8G8R8A8_UNORM = 44,
-    VK_FORMAT_R8G8B8A8_UNORM = 37
-} VkFormat;
+// Wine DirectX到Vulkan转换辅助类
+@interface DirectXToVulkanTranslator : NSObject
 
-// MoltenVK配置结构
-typedef struct MVKConfiguration {
-    BOOL debugMode;
-    BOOL useMetalArgumentBuffers;
-    BOOL logActivityPerformanceInline;
-    uint32_t maxActiveMetalCommandBuffersPerQueue;
-} MVKConfiguration;
+@property (nonatomic, weak, nullable) MoltenVKBridge *bridge;
 
-// MoltenVK图形桥接管理器
++ (instancetype)translatorWithBridge:(MoltenVKBridge * _Nonnull)bridge;
+
+// 修复的方法签名 - 确保与调用代码匹配
+- (BOOL)translateDirectXCall:(NSString * _Nonnull)functionName
+                  parameters:(NSArray * _Nonnull)parameters;
+
+// DirectX Draw调用转换
+- (VkResult)translateDrawCall:(NSString * _Nonnull)drawType
+                   parameters:(NSDictionary * _Nonnull)params
+                commandBuffer:(VkCommandBuffer _Nonnull)commandBuffer;
+
+// DirectX资源管理转换
+- (VkResult)translateResourceCreation:(NSString * _Nonnull)resourceType
+                           parameters:(NSDictionary * _Nonnull)params;
+
+// 着色器转换 (HLSL → SPIRV → MSL)
+- (NSData * _Nullable)translateShader:(NSString * _Nonnull)hlslCode
+                           shaderType:(NSString * _Nonnull)type;
+
+@end
+
+// MoltenVK到Metal桥接主类
 @interface MoltenVKBridge : NSObject
 
-@property (nonatomic, strong, readonly) id<MTLDevice> metalDevice;
-@property (nonatomic, strong, readonly) id<MTLCommandQueue> metalCommandQueue;
-@property (nonatomic, strong, readonly) MTKView *metalView;
-@property (nonatomic, assign, readonly) BOOL isInitialized;
-@property (nonatomic, strong, readonly) CAMetalLayer *metalLayer;
-
-// 单例管理
+// 单例访问
 + (instancetype)sharedBridge;
 
-// 初始化方法
-- (BOOL)initializeWithView:(UIView *)containerView;
+// 初始化和清理
+- (BOOL)initializeWithView:(UIView * _Nonnull)containerView;
 - (void)cleanup;
 
-// Vulkan实例管理
-- (VkResult)createVulkanInstance:(VkInstance *)instance;
-- (void)destroyVulkanInstance:(VkInstance)instance;
+// Vulkan实例和设备管理
+- (VkResult)createVulkanInstance:(VkInstance * _Nonnull)instance;
+- (VkResult)createVulkanDevice:(VkDevice * _Nonnull)device
+                  fromInstance:(VkInstance _Nonnull)instance;
 
-// 设备和队列管理
-- (VkResult)createVulkanDevice:(VkDevice *)device fromInstance:(VkInstance)instance;
-- (void)destroyVulkanDevice:(VkDevice)device;
-
-// 表面和交换链管理
-- (VkResult)createSurface:(VkSurfaceKHR *)surface forView:(UIView *)view instance:(VkInstance)instance;
-- (VkResult)createSwapchain:(VkSwapchainKHR *)swapchain
-                    surface:(VkSurfaceKHR)surface
-                     device:(VkDevice)device
-                     format:(VkFormat)format
+// Vulkan表面和交换链
+- (VkResult)createVulkanSurface:(VkSurfaceKHR * _Nonnull)surface
+                       instance:(VkInstance _Nonnull)instance
+                           view:(UIView * _Nonnull)view;
+- (VkResult)createSwapchain:(VkSwapchainKHR * _Nonnull)swapchain
+                     device:(VkDevice _Nonnull)device
+                    surface:(VkSurfaceKHR _Nonnull)surface
                       width:(uint32_t)width
                      height:(uint32_t)height;
 
-// 渲染管道管理
-- (VkResult)createRenderPass:(VkRenderPass *)renderPass device:(VkDevice)device format:(VkFormat)format;
-- (VkResult)createGraphicsPipeline:(VkPipeline *)pipeline
-                            device:(VkDevice)device
-                        renderPass:(VkRenderPass)renderPass;
+// 图形管道
+- (VkResult)createRenderPass:(VkRenderPass * _Nonnull)renderPass
+                      device:(VkDevice _Nonnull)device
+                      format:(VkFormat)format;
+- (VkResult)createGraphicsPipeline:(VkPipeline * _Nonnull)pipeline
+                            device:(VkDevice _Nonnull)device
+                        renderPass:(VkRenderPass _Nonnull)renderPass;
 
 // 命令缓冲区管理
-- (VkResult)createCommandBuffer:(VkCommandBuffer *)commandBuffer device:(VkDevice)device;
-- (VkResult)beginCommandBuffer:(VkCommandBuffer)commandBuffer;
-- (VkResult)endCommandBuffer:(VkCommandBuffer)commandBuffer;
-- (VkResult)submitCommandBuffer:(VkCommandBuffer)commandBuffer device:(VkDevice)device;
+- (VkResult)createCommandBuffer:(VkCommandBuffer * _Nonnull)commandBuffer
+                         device:(VkDevice _Nonnull)device;
+- (VkResult)beginCommandBuffer:(VkCommandBuffer _Nonnull)commandBuffer;
+- (VkResult)endCommandBuffer:(VkCommandBuffer _Nonnull)commandBuffer;
+- (VkResult)submitCommandBuffer:(VkCommandBuffer _Nonnull)commandBuffer
+                         device:(VkDevice _Nonnull)device;
 
 // 渲染操作
-- (VkResult)beginRenderPass:(VkCommandBuffer)commandBuffer
-                 renderPass:(VkRenderPass)renderPass
+- (VkResult)beginRenderPass:(VkCommandBuffer _Nonnull)commandBuffer
+                 renderPass:(VkRenderPass _Nonnull)renderPass
                       width:(uint32_t)width
                      height:(uint32_t)height;
-- (void)endRenderPass:(VkCommandBuffer)commandBuffer;
+- (void)endRenderPass:(VkCommandBuffer _Nonnull)commandBuffer;
 
 // Wine DirectX桥接方法
-- (BOOL)handleDirectXCall:(NSString *)functionName
-               parameters:(NSArray *)parameters
-               deviceContext:(void *)deviceContext;
+- (BOOL)handleDirectXCall:(NSString * _Nonnull)functionName
+               parameters:(NSArray * _Nonnull)parameters
+            deviceContext:(void * _Nullable)deviceContext;
 
 // Metal特定操作
 - (void)presentFrame;
 - (void)resizeToWidth:(CGFloat)width height:(CGFloat)height;
 
 // 调试和监控
-- (NSDictionary *)getVulkanInfo;
-- (NSDictionary *)getMetalInfo;
+- (NSDictionary * _Nonnull)getVulkanInfo;
+- (NSDictionary * _Nonnull)getMetalInfo;
 - (void)dumpPipelineStates;
-
-@end
-
-// Wine DirectX到Vulkan转换辅助类
-@interface DirectXToVulkanTranslator : NSObject
-
-@property (nonatomic, weak) MoltenVKBridge *bridge;
-
-+ (instancetype)translatorWithBridge:(MoltenVKBridge *)bridge;
-
-// DirectX调用转换
-- (BOOL)translateDirectXCall:(NSString *)functionName parameters:(NSArray *)parameters;
-
-// DirectX Draw调用转换
-- (VkResult)translateDrawCall:(NSString *)drawType
-                   parameters:(NSDictionary *)params
-                commandBuffer:(VkCommandBuffer)commandBuffer;
-
-// DirectX资源管理转换
-- (VkResult)translateResourceCreation:(NSString *)resourceType
-                           parameters:(NSDictionary *)params;
-
-// 着色器转换 (HLSL → SPIRV → MSL)
-- (NSData *)translateShader:(NSString *)hlslCode shaderType:(NSString *)type;
 
 @end
 
