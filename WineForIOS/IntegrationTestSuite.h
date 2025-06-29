@@ -4,6 +4,7 @@
 #import "GraphicsEnhancedExecutionEngine.h"
 #import "EnhancedMoltenVKIntegration.h"
 #import "ExtendedInstructionProcessor.h"
+#import "TestBinaryCreator.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
