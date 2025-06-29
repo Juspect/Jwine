@@ -30,6 +30,7 @@ typedef struct JITContext {
 // JIT初始化和清理
 - (BOOL)initializeJIT;
 - (void)cleanupJIT;
+- (void)cleanup;  // 新增：为了兼容CompleteExecutionEngine的调用
 
 // 内存管理
 - (void *)allocateJITMemory:(size_t)size;

@@ -11,7 +11,16 @@ typedef NS_ENUM(NSInteger, ExecutionResult) {
     ExecutionResultFailure = -1,
     ExecutionResultInvalidFile = -2,
     ExecutionResultMemoryError = -3,
-    ExecutionResultInitError = -4
+    ExecutionResultInitError = -4,
+    
+    // 新增的枚举值
+    ExecutionResultNotInitialized = -5,
+    ExecutionResultAlreadyExecuting = -6,
+    ExecutionResultTimeout = -7,
+    ExecutionResultSecurityError = -8,
+    ExecutionResultExecutionError = -9,
+    ExecutionResultSecurityWarning = -10,
+    ExecutionResultCrash = -11
 };
 
 @class CompleteExecutionEngine;
@@ -35,17 +44,17 @@ typedef NS_ENUM(NSInteger, ExecutionResult) {
 + (instancetype)sharedEngine;
 
 // 初始化和配置
-- (BOOL)initializeWithViewController:(UIViewController *)viewController;
+- (BOOL)initializeEngines;  // 修改方法名以匹配实现
 - (void)cleanup;
 
 // 程序执行
-- (ExecutionResult)executeProgram:(NSString *)exePath;
-- (ExecutionResult)executeProgram:(NSString *)exePath arguments:(nullable NSArray<NSString *> *)arguments;
+- (void)executeProgram:(NSString *)programPath;  // 修改为异步执行
 - (void)stopExecution;
 
 // 系统状态
 - (NSDictionary *)getSystemInfo;
 - (NSString *)getEngineStatus;
+- (NSArray<NSString *> *)getExecutionLog;  // 新增方法
 - (void)dumpAllStates;
 
 @end
