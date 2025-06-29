@@ -74,9 +74,12 @@
         return NO;
     }
     
-    // 3. 初始化Wine API (使用基础初始化方法)
-    if (![_wineAPI initialize]) {
-        NSLog(@"[GraphicsEnhancedExecutionEngine] Failed to initialize Wine API");
+    // 3. 配置Wine API (WineAPI通过sharedAPI自动初始化，只需设置根视图控制器)
+    if (_wineAPI) {
+        _wineAPI.rootViewController = viewController;
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Wine API configured successfully");
+    } else {
+        NSLog(@"[GraphicsEnhancedExecutionEngine] Failed to get Wine API instance");
         return NO;
     }
     
