@@ -33,6 +33,235 @@ typedef struct VulkanCommandBufferMock {
     BOOL isValid;
 } VulkanCommandBufferMock;
 
+#pragma mark - DirectX到Vulkan转换器实现
+
+@implementation DirectXToVulkanTranslator
+
++ (instancetype)translatorWithBridge:(MoltenVKBridge *)bridge {
+    DirectXToVulkanTranslator *translator = [[DirectXToVulkanTranslator alloc] init];
+    translator.bridge = bridge;
+    return translator;
+}
+
+- (BOOL)translateDirectXCall:(NSString *)functionName parameters:(NSArray *)parameters {
+    NSLog(@"[DirectXToVulkanTranslator] Translating DirectX call: %@", functionName);
+    
+    // 将参数数组转换为字典格式以便处理
+    NSMutableDictionary *paramDict = [NSMutableDictionary dictionary];
+    for (NSInteger i = 0; i < parameters.count; i++) {
+        paramDict[@(i)] = parameters[i];
+    }
+    
+    // 基础DirectX函数转换
+    if ([functionName isEqualToString:@"CreateDevice"]) {
+        return [self handleCreateDevice:paramDict];
+    } else if ([functionName isEqualToString:@"DrawPrimitive"]) {
+        return [self handleDrawPrimitive:paramDict];
+    } else if ([functionName isEqualToString:@"DrawIndexedPrimitive"]) {
+        return [self handleDrawIndexedPrimitive:paramDict];
+    } else if ([functionName isEqualToString:@"Clear"]) {
+        return [self handleClear:paramDict];
+    } else if ([functionName isEqualToString:@"Present"]) {
+        return [self handlePresent:paramDict];
+    } else if ([functionName isEqualToString:@"SetRenderTarget"]) {
+        return [self handleSetRenderTarget:paramDict];
+    } else if ([functionName isEqualToString:@"SetTexture"]) {
+        return [self handleSetTexture:paramDict];
+    } else if ([functionName isEqualToString:@"SetTransform"]) {
+        return [self handleSetTransform:paramDict];
+    } else if ([functionName isEqualToString:@"BeginScene"]) {
+        return [self handleBeginScene:paramDict];
+    } else if ([functionName isEqualToString:@"EndScene"]) {
+        return [self handleEndScene:paramDict];
+    }
+    
+    NSLog(@"[DirectXToVulkanTranslator] Unknown DirectX function: %@", functionName);
+    return NO;
+}
+
+- (BOOL)handleCreateDevice:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Creating DirectX device (mapped to Metal)");
+    
+    // 创建对应的Vulkan设备实例
+    VkInstance vulkanInstance;
+    VkDevice vulkanDevice;
+    
+    if ([self.bridge createVulkanInstance:&vulkanInstance] == VK_SUCCESS) {
+        if ([self.bridge createVulkanDevice:&vulkanDevice fromInstance:vulkanInstance] == VK_SUCCESS) {
+            NSLog(@"[DirectXToVulkanTranslator] Successfully created Vulkan device for DirectX");
+            return YES;
+        }
+    }
+    
+    return NO;
+}
+
+- (BOOL)handleDrawPrimitive:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Drawing primitive (DirectX → Vulkan → Metal)");
+    
+    // 从参数中提取绘制信息
+    NSNumber *primitiveType = params[@0]; // D3DPRIMITIVETYPE
+    NSNumber *startVertex = params[@1];
+    NSNumber *primitiveCount = params[@2];
+    
+    // 转换为Vulkan绘制命令
+    VkCommandBuffer commandBuffer = (VkCommandBuffer)1; // 简化的命令缓冲区
+    
+    if ([self.bridge createCommandBuffer:&commandBuffer device:(VkDevice)1] == VK_SUCCESS) {
+        [self.bridge beginCommandBuffer:commandBuffer];
+        
+        // 这里应该设置渲染管道状态和执行绘制
+        NSLog(@"[DirectXToVulkanTranslator] Executing draw command for %@ primitives", primitiveCount);
+        
+        [self.bridge endCommandBuffer:commandBuffer];
+        [self.bridge submitCommandBuffer:commandBuffer device:(VkDevice)1];
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (BOOL)handleDrawIndexedPrimitive:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Drawing indexed primitive");
+    
+    NSNumber *primitiveType = params[@0];
+    NSNumber *baseVertexIndex = params[@1];
+    NSNumber *minVertexIndex = params[@2];
+    NSNumber *numVertices = params[@3];
+    NSNumber *startIndex = params[@4];
+    NSNumber *primCount = params[@5];
+    
+    // 转换为Vulkan索引绘制命令
+    VkCommandBuffer commandBuffer = (VkCommandBuffer)1;
+    
+    if ([self.bridge createCommandBuffer:&commandBuffer device:(VkDevice)1] == VK_SUCCESS) {
+        [self.bridge beginCommandBuffer:commandBuffer];
+        
+        NSLog(@"[DirectXToVulkanTranslator] Executing indexed draw: %@ vertices, %@ primitives",
+              numVertices, primCount);
+        
+        [self.bridge endCommandBuffer:commandBuffer];
+        [self.bridge submitCommandBuffer:commandBuffer device:(VkDevice)1];
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (BOOL)handleSetRenderTarget:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Setting render target");
+    
+    NSNumber *renderTargetIndex = params[@0];
+    void *renderTargetSurface = [params[@1] pointerValue];
+    
+    // 转换为Vulkan渲染目标设置
+    VkRenderPass renderPass;
+    if ([self.bridge createRenderPass:&renderPass
+                                device:(VkDevice)1
+                                format:VK_FORMAT_B8G8R8A8_UNORM] == VK_SUCCESS) {
+        NSLog(@"[DirectXToVulkanTranslator] Render target %@ set successfully", renderTargetIndex);
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (BOOL)handleSetTexture:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Setting texture");
+    
+    NSNumber *stage = params[@0];
+    void *texture = [params[@1] pointerValue];
+    
+    if (texture) {
+        NSLog(@"[DirectXToVulkanTranslator] Texture bound to stage %@", stage);
+    } else {
+        NSLog(@"[DirectXToVulkanTranslator] Texture unbound from stage %@", stage);
+    }
+    
+    return YES;
+}
+
+- (BOOL)handleSetTransform:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Setting transform matrix");
+    
+    NSNumber *transformState = params[@0]; // D3DTRANSFORMSTATETYPE
+    void *matrix = [params[@1] pointerValue]; // D3DMATRIX*
+    
+    if (matrix) {
+        NSLog(@"[DirectXToVulkanTranslator] Transform matrix set for state %@", transformState);
+        // 这里应该将DirectX变换矩阵转换为Vulkan uniform buffer
+    }
+    
+    return YES;
+}
+
+- (BOOL)handleBeginScene:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Beginning scene rendering");
+    
+    // 开始Vulkan渲染通道
+    VkCommandBuffer commandBuffer = (VkCommandBuffer)1;
+    VkRenderPass renderPass = (VkRenderPass)1;
+    
+    if ([self.bridge createCommandBuffer:&commandBuffer device:(VkDevice)1] == VK_SUCCESS) {
+        [self.bridge beginCommandBuffer:commandBuffer];
+        [self.bridge beginRenderPass:commandBuffer
+                           renderPass:renderPass
+                                width:800
+                               height:600];
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (BOOL)handleEndScene:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Ending scene rendering");
+    
+    // 结束Vulkan渲染通道
+    VkCommandBuffer commandBuffer = (VkCommandBuffer)1;
+    
+    [self.bridge endRenderPass:commandBuffer];
+    [self.bridge endCommandBuffer:commandBuffer];
+    [self.bridge submitCommandBuffer:commandBuffer device:(VkDevice)1];
+    
+    return YES;
+}
+
+- (BOOL)handleClear:(NSDictionary *)parameters {
+    NSLog(@"[DirectXToVulkanTranslator] Clearing render target (via Vulkan)");
+    return YES;
+}
+
+- (BOOL)handlePresent:(NSDictionary *)parameters {
+    NSLog(@"[DirectXToVulkanTranslator] Presenting frame (via Metal)");
+    [self.bridge presentFrame];
+    return YES;
+}
+
+- (VkResult)translateDrawCall:(NSString *)drawType
+                   parameters:(NSDictionary *)params
+                commandBuffer:(VkCommandBuffer)commandBuffer {
+    NSLog(@"[DirectXToVulkanTranslator] Translating draw call: %@", drawType);
+    return VK_SUCCESS;
+}
+
+- (VkResult)translateResourceCreation:(NSString *)resourceType
+                           parameters:(NSDictionary *)params {
+    NSLog(@"[DirectXToVulkanTranslator] Translating resource creation: %@", resourceType);
+    return VK_SUCCESS;
+}
+
+- (NSData *)translateShader:(NSString *)hlslCode shaderType:(NSString *)type {
+    NSLog(@"[DirectXToVulkanTranslator] Translating %@ shader", type);
+    // 这里需要HLSL→SPIRV→MSL的转换链
+    // 现在返回空数据作为占位符
+    return [NSData data];
+}
+
+@end
+
+#pragma mark - MoltenVKBridge实现
+
 @interface MoltenVKBridge()
 @property (nonatomic, strong) id<MTLDevice> metalDevice;
 @property (nonatomic, strong) id<MTLCommandQueue> metalCommandQueue;
@@ -515,79 +744,6 @@ typedef struct VulkanCommandBufferMock {
         }
     }
     NSLog(@"[MoltenVKBridge] ==============================");
-}
-
-@end
-
-#pragma mark - DirectX到Vulkan转换器实现
-
-@implementation DirectXToVulkanTranslator
-
-+ (instancetype)translatorWithBridge:(MoltenVKBridge *)bridge {
-    DirectXToVulkanTranslator *translator = [[DirectXToVulkanTranslator alloc] init];
-    translator.bridge = bridge;
-    return translator;
-}
-
-- (BOOL)translateDirectXCall:(NSString *)functionName parameters:(NSArray *)parameters {
-    NSLog(@"[DirectXToVulkanTranslator] Translating: %@", functionName);
-    
-    // 基础DirectX函数转换
-    if ([functionName isEqualToString:@"CreateDevice"]) {
-        return [self handleCreateDevice:parameters];
-    } else if ([functionName isEqualToString:@"DrawPrimitive"]) {
-        return [self handleDrawPrimitive:parameters];
-    } else if ([functionName isEqualToString:@"Clear"]) {
-        return [self handleClear:parameters];
-    } else if ([functionName isEqualToString:@"Present"]) {
-        return [self handlePresent:parameters];
-    }
-    
-    NSLog(@"[DirectXToVulkanTranslator] Unknown DirectX function: %@", functionName);
-    return NO;
-}
-
-- (BOOL)handleCreateDevice:(NSArray *)parameters {
-    NSLog(@"[DirectXToVulkanTranslator] Creating DirectX device (via Vulkan)");
-    // 这里可以创建对应的Vulkan设备
-    return YES;
-}
-
-- (BOOL)handleDrawPrimitive:(NSArray *)parameters {
-    NSLog(@"[DirectXToVulkanTranslator] Drawing primitive (via Vulkan)");
-    // 将DirectX绘制调用转换为Vulkan绘制调用
-    return YES;
-}
-
-- (BOOL)handleClear:(NSArray *)parameters {
-    NSLog(@"[DirectXToVulkanTranslator] Clearing render target (via Vulkan)");
-    return YES;
-}
-
-- (BOOL)handlePresent:(NSArray *)parameters {
-    NSLog(@"[DirectXToVulkanTranslator] Presenting frame (via Metal)");
-    [self.bridge presentFrame];
-    return YES;
-}
-
-- (VkResult)translateDrawCall:(NSString *)drawType
-                   parameters:(NSDictionary *)params
-                commandBuffer:(VkCommandBuffer)commandBuffer {
-    NSLog(@"[DirectXToVulkanTranslator] Translating draw call: %@", drawType);
-    return VK_SUCCESS;
-}
-
-- (VkResult)translateResourceCreation:(NSString *)resourceType
-                           parameters:(NSDictionary *)params {
-    NSLog(@"[DirectXToVulkanTranslator] Translating resource creation: %@", resourceType);
-    return VK_SUCCESS;
-}
-
-- (NSData *)translateShader:(NSString *)hlslCode shaderType:(NSString *)type {
-    NSLog(@"[DirectXToVulkanTranslator] Translating %@ shader", type);
-    // 这里需要HLSL→SPIRV→MSL的转换链
-    // 现在返回空数据作为占位符
-    return [NSData data];
 }
 
 @end

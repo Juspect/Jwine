@@ -1,12 +1,12 @@
 #import "AppDelegate.h"
-#import "MainViewController.h"
+#import "FinalMainViewController.h"
 
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     
-    MainViewController *mainVC = [[MainViewController alloc] init];
+    FinalMainViewController *mainVC = [[FinalMainViewController alloc] init];
     UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:mainVC];
     
     self.window.rootViewController = navController;

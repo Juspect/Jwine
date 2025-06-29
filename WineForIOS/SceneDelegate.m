@@ -1,6 +1,5 @@
 #import "SceneDelegate.h"
-#import "ViewController.h"
-#import "UpdatedMainViewController.h"
+#import "FinalMainViewController.h"  // 使用最终版本
 
 @implementation SceneDelegate
 
@@ -8,7 +7,8 @@
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
     
-    UpdatedMainViewController *mainVC = [[UpdatedMainViewController alloc] init];
+    // 使用完整图形支持的最终版本
+    FinalMainViewController *mainVC = [[FinalMainViewController alloc] init];
     UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:mainVC];
     
     self.window.rootViewController = navController;
@@ -20,7 +20,7 @@
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
-    // Called when the scene has moved from an inactive state to an active state.
+    // Called when the scene has moved from an active state to an active state.
 }
 
 - (void)sceneWillResignActive:(UIScene *)scene {

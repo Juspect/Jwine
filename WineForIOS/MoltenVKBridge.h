@@ -115,6 +115,9 @@ typedef struct MVKConfiguration {
 
 + (instancetype)translatorWithBridge:(MoltenVKBridge *)bridge;
 
+// DirectX调用转换
+- (BOOL)translateDirectXCall:(NSString *)functionName parameters:(NSArray *)parameters;
+
 // DirectX Draw调用转换
 - (VkResult)translateDrawCall:(NSString *)drawType
                    parameters:(NSDictionary *)params
