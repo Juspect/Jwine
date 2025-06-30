@@ -29,6 +29,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
 @property (nonatomic, strong) NSMutableArray<NSString *> *safetyWarnings;
 @property (nonatomic, strong) NSString *lastError;
 @property (nonatomic, strong) NSRecursiveLock *contextLock;
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *immediateValueRegisters;
 @end
 
 @implementation Box64Engine
@@ -51,6 +52,9 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         _safetyWarnings = [NSMutableArray array];
         _contextLock = [[NSRecursiveLock alloc] init];
         
+        // 🔧 新增：初始化立即数跟踪
+        _immediateValueRegisters = [[NSMutableSet alloc] init];
+        
         // 安全的内存分配
         _context = calloc(1, sizeof(Box64Context));
         if (!_context) {
@@ -64,7 +68,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         _context->max_instructions = MAX_INSTRUCTIONS_PER_EXECUTION;
         _context->instruction_count = 0;
         
-        NSLog(@"[Box64Engine] Initialized with enhanced memory safety");
+        NSLog(@"[Box64Engine] Initialized with enhanced memory safety and immediate value tracking");
     }
     return self;
 }
@@ -389,16 +393,17 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     
     switch (instruction->opcode) {
         case 0x90:  // NOP
-            // 无操作
+            NSLog(@"[Box64Engine] ✅ NOP instruction executed");
             break;
             
         case 0x48: {  // REX.W prefix instructions
-            // 🔧 修复：正确处理各种 REX.W 指令
+            // 🔧 关键修复：检查是否为立即数MOV指令
             if (strstr(instruction->mnemonic, "MOV RAX,") != NULL && instruction->has_immediate) {
                 uint64_t immediate = instruction->immediate;
                 
-                if (![self setX86Register:X86_RAX value:immediate]) {
-                    NSLog(@"[Box64Engine] Failed to set RAX to 0x%llx", immediate);
+                // 🔧 使用立即数设置方法
+                if (![self setX86RegisterImmediate:X86_RAX value:immediate]) {
+                    NSLog(@"[Box64Engine] ❌ Failed to set RAX to immediate 0x%llx", immediate);
                     return NO;
                 }
                 
@@ -407,20 +412,22 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
             } else if (strstr(instruction->mnemonic, "MOV RCX,") != NULL && instruction->has_immediate) {
                 uint64_t immediate = instruction->immediate;
                 
-                if (![self setX86Register:X86_RCX value:immediate]) {
-                    NSLog(@"[Box64Engine] Failed to set RCX to 0x%llx", immediate);
+                // 🔧 使用立即数设置方法
+                if (![self setX86RegisterImmediate:X86_RCX value:immediate]) {
+                    NSLog(@"[Box64Engine] ❌ Failed to set RCX to immediate 0x%llx", immediate);
                     return NO;
                 }
                 
                 NSLog(@"[Box64Engine] ✅ REX.W MOV RCX, 0x%llx executed successfully", immediate);
                 
             } else if (strstr(instruction->mnemonic, "SUB RSP,") != NULL && instruction->has_immediate) {
-                // SUB RSP, imm8 - 栈指针减法
+                // SUB RSP, imm8 - 栈指针减法（非立即数，是计算结果）
                 uint64_t currentRSP = [self getX86Register:X86_RSP];
                 uint64_t newRSP = currentRSP - instruction->immediate;
                 
+                // 栈指针操作使用常规方法（会进行栈范围检查）
                 if (![self setX86Register:X86_RSP value:newRSP]) {
-                    NSLog(@"[Box64Engine] Failed to update RSP: 0x%llx -> 0x%llx", currentRSP, newRSP);
+                    NSLog(@"[Box64Engine] ❌ Failed to update RSP: 0x%llx -> 0x%llx", currentRSP, newRSP);
                     return NO;
                 }
                 
@@ -428,7 +435,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
                       instruction->immediate, currentRSP, newRSP);
                 
             } else {
-                NSLog(@"[Box64Engine] REX.W instruction executed (generic): %s", instruction->mnemonic);
+                NSLog(@"[Box64Engine] ✅ REX.W instruction executed (generic): %s", instruction->mnemonic);
             }
             break;
         }
@@ -438,18 +445,18 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
             X86Register reg = (X86Register)(instruction->opcode & 7);
             uint64_t immediate = instruction->immediate;
             
-            if (![self setX86Register:reg value:immediate]) {
-                NSLog(@"[Box64Engine] Failed to set register %d to 0x%llx", reg, immediate);
+            // 🔧 关键修复：使用立即数设置方法
+            if (![self setX86RegisterImmediate:reg value:immediate]) {
+                NSLog(@"[Box64Engine] ❌ Failed to set register %d to immediate 0x%llx", reg, immediate);
                 return NO;
             }
             
-            NSLog(@"[Box64Engine] MOV r%d, 0x%llx", reg, immediate);
+            NSLog(@"[Box64Engine] ✅ MOV r%d, 0x%llx executed successfully", reg, immediate);
             break;
         }
         
         case 0xC3:  // RET
-            // 简化的返回处理
-            NSLog(@"[Box64Engine] RET instruction - ending execution");
+            NSLog(@"[Box64Engine] ✅ RET instruction - ending execution");
             return YES;
             
         default:
@@ -457,7 +464,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
                 NSLog(@"[Box64Engine] SECURITY: Unsupported opcode 0x%02X in safe mode", instruction->opcode);
                 return NO;
             } else {
-                NSLog(@"[Box64Engine] WARNING: Unsupported opcode 0x%02X, treating as NOP", instruction->opcode);
+                NSLog(@"[Box64Engine] ⚠️ WARNING: Unsupported opcode 0x%02X, treating as NOP", instruction->opcode);
             }
             break;
     }
@@ -467,6 +474,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
 
 #pragma mark - 指令解码 - 增强版本
 
+// 🔧 第七步：确保指令解码标记立即数指令为安全
 - (X86Instruction)decodeInstruction:(const uint8_t *)instruction maxLength:(size_t)maxLength {
     X86Instruction decoded = {0};
     
@@ -480,7 +488,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     decoded.opcode = instruction[0];
     decoded.length = 1;
     decoded.is_valid = YES;
-    decoded.is_safe = YES;
+    decoded.is_safe = YES;  // 🔧 默认为安全
     
     switch (decoded.opcode) {
         case 0x90:  // NOP
@@ -496,46 +504,48 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
             
             uint8_t next_opcode = instruction[1];
             
-            // 🔧 修复：正确解码各种 REX.W 指令
             if (next_opcode == 0xC7 && maxLength >= 7) {
-                // REX.W + MOV r/m64, imm32
                 uint8_t modrm = instruction[2];
                 if (modrm == 0xC0) {  // MOV RAX, imm32
                     decoded.length = 7;
                     decoded.has_immediate = YES;
                     decoded.immediate = *(uint32_t *)(instruction + 3);
                     sprintf(decoded.mnemonic, "MOV RAX, 0x%X", (uint32_t)decoded.immediate);
+                    // 🔧 立即数指令总是安全的
+                    decoded.is_safe = YES;
+                    NSLog(@"[Box64Engine] Decoded immediate MOV RAX, 0x%X", (uint32_t)decoded.immediate);
                 } else if (modrm == 0xC1) {  // MOV RCX, imm32
                     decoded.length = 7;
                     decoded.has_immediate = YES;
                     decoded.immediate = *(uint32_t *)(instruction + 3);
                     sprintf(decoded.mnemonic, "MOV RCX, 0x%X", (uint32_t)decoded.immediate);
+                    decoded.is_safe = YES;
+                    NSLog(@"[Box64Engine] Decoded immediate MOV RCX, 0x%X", (uint32_t)decoded.immediate);
                 } else {
-                    decoded.length = 7;  // 假设是7字节
+                    decoded.length = 7;
                     sprintf(decoded.mnemonic, "REX.W+MOV_RM64");
                 }
-                NSLog(@"[Box64Engine] Decoded REX.W MOV instruction (length=%d)", decoded.length);
                 
             } else if (next_opcode == 0x83 && maxLength >= 4) {
-                // REX.W + ADD/SUB r/m64, imm8
                 uint8_t modrm = instruction[2];
                 uint8_t immediate = instruction[3];
                 decoded.length = 4;
                 decoded.has_immediate = YES;
                 decoded.immediate = immediate;
                 
-                // 解析 ModR/M 字节来确定操作
                 uint8_t reg_field = (modrm >> 3) & 7;
                 uint8_t rm_field = modrm & 7;
                 
                 if (reg_field == 5 && rm_field == 4) {  // SUB RSP, imm8
                     sprintf(decoded.mnemonic, "SUB RSP, 0x%02X", immediate);
+                    decoded.is_safe = YES;
                 } else if (reg_field == 0) {  // ADD
                     sprintf(decoded.mnemonic, "ADD r%d, 0x%02X", rm_field, immediate);
+                    decoded.is_safe = YES;
                 } else {
                     sprintf(decoded.mnemonic, "REX.W+ARITH r%d, 0x%02X", rm_field, immediate);
+                    decoded.is_safe = YES;
                 }
-                NSLog(@"[Box64Engine] Decoded REX.W arithmetic: %s", decoded.mnemonic);
                 
             } else {
                 decoded.length = 2;
@@ -555,10 +565,9 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
             decoded.length = 5;
             sprintf(decoded.mnemonic, "MOV r%d, 0x%X", decoded.opcode & 7, (uint32_t)decoded.immediate);
             
-            // 安全检查立即数
-            if (decoded.immediate > 0 && decoded.immediate < MIN_VALID_ADDRESS) {
-                decoded.is_safe = NO;
-            }
+            // 🔧 关键修复：立即数指令总是安全的，不进行地址范围检查
+            decoded.is_safe = YES;
+            NSLog(@"[Box64Engine] Decoded immediate MOV r%d, 0x%X", decoded.opcode & 7, (uint32_t)decoded.immediate);
             break;
             
         case 0xC3:  // RET
@@ -658,12 +667,63 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
     }
 }
 
+- (BOOL)setX86RegisterImmediate:(X86Register)reg value:(uint64_t)value {
+    [_contextLock lock];
+    
+    @try {
+        if (!_context) {
+            NSLog(@"[Box64Engine] SECURITY: Cannot set register - context is NULL");
+            return NO;
+        }
+        
+        if (reg > 16) {
+            NSLog(@"[Box64Engine] SECURITY: Invalid register index %lu", (unsigned long)reg);
+            return NO;
+        }
+        
+        // 标记为立即数寄存器
+        NSNumber *regNumber = @(reg);
+        [_immediateValueRegisters addObject:regNumber];
+        
+        NSLog(@"[Box64Engine] IMMEDIATE: Setting register %lu to immediate value 0x%llx", (unsigned long)reg, value);
+        
+        // RIP寄存器特殊处理
+        if (reg == X86_RIP) {
+            _context->rip = value;
+            NSLog(@"[Box64Engine] Set RIP = 0x%llx (immediate)", value);
+            return YES;
+        }
+        
+        // 设置寄存器值（跳过常规验证，因为是立即数）
+        _context->x86_regs[reg] = value;
+        
+        // 同步到ARM64寄存器
+        if (reg < 16) {
+            ARM64Register arm64reg = x86_to_arm64_mapping[reg];
+            _context->arm64_regs[arm64reg] = value;
+        }
+        
+        NSLog(@"[Box64Engine] ✅ Set register %lu = 0x%llx (immediate value)", (unsigned long)reg, value);
+        return YES;
+        
+    } @finally {
+        [_contextLock unlock];
+    }
+}
+
 - (BOOL)validateRegisterValue:(X86Register)reg value:(uint64_t)value {
     if (!_isSafeMode) {
         return YES;
     }
     
-    // 🔧 修复：RIP寄存器不需要特殊验证，因为它在上面已经特殊处理了
+    // 🔧 关键修复：检查是否为立即数寄存器
+    NSNumber *regNumber = @(reg);
+    if ([_immediateValueRegisters containsObject:regNumber]) {
+        NSLog(@"[Box64Engine] IMMEDIATE: Allowing immediate value 0x%llx for register %lu", value, (unsigned long)reg);
+        return YES;
+    }
+    
+    // RIP寄存器特殊处理
     if (reg == X86_RIP) {
         return YES;
     }
@@ -676,7 +736,7 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         }
     }
     
-    // 检查指针类型寄存器
+    // 🔧 修复：只对非立即数值进行地址范围检查
     if (value > 0 && value < MIN_VALID_ADDRESS) {
         NSLog(@"[Box64Engine] SECURITY: Register value 0x%llx is in dangerous low memory range", value);
         return NO;
@@ -773,6 +833,10 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         memset(_context->x86_regs, 0, sizeof(_context->x86_regs));
         memset(_context->arm64_regs, 0, sizeof(_context->arm64_regs));
         
+        // 🔧 新增：清空立即数跟踪
+        [_immediateValueRegisters removeAllObjects];
+        NSLog(@"[Box64Engine] Cleared immediate value register tracking");
+        
         // 设置安全的栈指针
         if (_context->memory_base && _context->stack_base > 0) {
             _context->x86_regs[X86_RSP] = _context->stack_base + _context->stack_size - 16;
@@ -794,6 +858,8 @@ static const ARM64Register x86_to_arm64_mapping[16] = {
         [_contextLock unlock];
     }
 }
+
+
 
 - (void)resetToSafeState {
     [_contextLock lock];

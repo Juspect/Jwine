@@ -126,6 +126,7 @@ typedef struct X86Instruction {
 - (uint64_t)getX86Register:(X86Register)reg;
 - (BOOL)setX86Register:(X86Register)reg value:(uint64_t)value;
 - (BOOL)validateRegisterValue:(X86Register)reg value:(uint64_t)value;
+- (BOOL)setX86RegisterImmediate:(X86Register)reg value:(uint64_t)value;
 
 // 指令解码 - 增强版本
 - (X86Instruction)decodeInstruction:(const uint8_t *)instruction maxLength:(size_t)maxLength;
